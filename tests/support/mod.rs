@@ -8,6 +8,7 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 use futures::future::{self, Either};
 use hdrhistogram::Histogram;
+use serde_json::json;
 use thiserror::Error;
 use tokio::{
     select,
@@ -20,7 +21,9 @@ use tokio_util::sync::CancellationToken;
 use codecrafters_dns_server::concurrency::{
     ConcurrencyController, ConcurrencyLimits, ConcurrencyPermit,
 };
-use codecrafters_dns_server::control_plane::{ExtendOutcome as AgentExtendOutcome, TaskKind};
+use codecrafters_dns_server::control_plane::{
+    ExtendOutcome as AgentExtendOutcome, LeaseReport, Observation, TaskKind, TaskSpec,
+};
 use codecrafters_dns_server::lease_extender::{
     spawn_lease_extender, LeaseExtendClient, LeaseExtendUpdate, LeaseExtenderClient,
     LeaseExtenderConfig, LeaseExtenderHandle,
@@ -62,6 +65,7 @@ pub struct Task {
     pub id: u64,
     pub kind: TaskType,
     pub enqueued_at: Instant,
+    pub spec: TaskSpec,
 }
 
 impl Task {
@@ -70,7 +74,33 @@ impl Task {
             id,
             kind,
             enqueued_at: Instant::now(),
+            spec: default_spec(id, kind),
         }
+    }
+}
+
+fn default_spec(id: u64, kind: TaskType) -> TaskSpec {
+    match kind {
+        TaskType::Dns => TaskSpec::Dns {
+            query: format!("example-{id}.com"),
+            server: None,
+        },
+        TaskType::Http => TaskSpec::Http {
+            url: format!("https://example.com/{id}"),
+            method: Some("GET".into()),
+        },
+        TaskType::Tcp => TaskSpec::Tcp(codecrafters_dns_server::control_plane::TcpSpec {
+            host: "127.0.0.1".into(),
+            port: 80,
+        }),
+        TaskType::Ping => TaskSpec::Ping(codecrafters_dns_server::control_plane::PingSpec {
+            host: "127.0.0.1".into(),
+            count: Some(4),
+        }),
+        TaskType::Trace => TaskSpec::Trace(codecrafters_dns_server::control_plane::TraceSpec {
+            host: "127.0.0.1".into(),
+            max_hops: Some(6),
+        }),
     }
 }
 
@@ -166,8 +196,8 @@ pub struct ExtendOutcome {
 #[derive(Debug, Clone)]
 pub struct ReportRequest {
     pub agent_id: AgentId,
-    pub completed: Vec<u64>,
-    pub cancelled: Vec<u64>,
+    pub completed: Vec<LeaseReport>,
+    pub cancelled: Vec<LeaseReport>,
 }
 
 #[derive(Debug)]
@@ -601,7 +631,8 @@ impl MockBackendDriver {
                         BackendRequest::Report { request, respond_to } => {
                             let behavior = self.behavior_rx.borrow().clone();
                             let mut error = None;
-                            for lease_id in request.completed {
+                            for entry in &request.completed {
+                                let lease_id = entry.lease_id;
                                 if error.is_some() {
                                     break;
                                 }
@@ -612,8 +643,8 @@ impl MockBackendDriver {
                                 }
                             }
                             if error.is_none() {
-                                for lease_id in request.cancelled {
-                                    if let Some(state) = leases.remove(&lease_id) {
+                                for entry in &request.cancelled {
+                                    if let Some(state) = leases.remove(&entry.lease_id) {
                                         let _ = state;
                                     }
                                 }
@@ -681,6 +712,7 @@ fn to_control_plane_lease(lease: &LeasedTask) -> codecrafters_dns_server::contro
         task_id: lease.task.id,
         kind: lease.task.kind.into(),
         lease_until_ms: remaining,
+        spec: lease.task.spec.clone(),
     }
 }
 
@@ -716,15 +748,30 @@ async fn process_task(
             .report(ReportRequest {
                 agent_id,
                 completed: Vec::new(),
-                cancelled: vec![lease_id],
+                cancelled: vec![LeaseReport {
+                    lease_id,
+                    observations: vec![Observation {
+                        name: "cancelled".into(),
+                        value: json!(true),
+                        unit: None,
+                    }],
+                }],
             })
             .await;
     } else {
         stats.record_completion(kind, start.elapsed(), task_id);
+        let latency = start.elapsed().as_secs_f64() * 1000.0;
         let _ = backend
             .report(ReportRequest {
                 agent_id,
-                completed: vec![lease_id],
+                completed: vec![LeaseReport {
+                    lease_id,
+                    observations: vec![Observation {
+                        name: "latency_ms".into(),
+                        value: json!(latency),
+                        unit: Some("ms".into()),
+                    }],
+                }],
                 cancelled: Vec::new(),
             })
             .await;

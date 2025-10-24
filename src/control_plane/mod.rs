@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use thiserror::Error;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Instant};
@@ -49,12 +50,73 @@ pub struct HeartbeatResponse {
 }
 
 /// Representation of a leased task.
+/// Specification describing how a task should be executed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TaskSpec {
+    Dns {
+        query: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        server: Option<String>,
+    },
+    Http {
+        url: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        method: Option<String>,
+    },
+    Tcp(TcpSpec),
+    Ping(PingSpec),
+    Trace(TraceSpec),
+}
+
+/// Specification for TCP checks.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TcpSpec {
+    pub host: String,
+    pub port: u16,
+}
+
+/// Specification for ping checks.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PingSpec {
+    pub host: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub count: Option<u32>,
+}
+
+/// Specification for traceroute checks.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TraceSpec {
+    pub host: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_hops: Option<u8>,
+}
+
+/// Observation produced while processing a lease.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Observation {
+    pub name: String,
+    pub value: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+}
+
+/// Structured report for a lease outcome.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LeaseReport {
+    pub lease_id: u64,
+    #[serde(default)]
+    pub observations: Vec<Observation>,
+}
+
+/// Representation of a leased task.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct Lease {
     pub lease_id: u64,
     pub task_id: u64,
     pub kind: TaskKind,
     pub lease_until_ms: u64,
+    pub spec: TaskSpec,
 }
 
 /// Batched set of leases returned by the control plane when claiming work.
@@ -95,8 +157,8 @@ pub struct ExtendRequest {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ReportRequest {
     pub agent_id: u64,
-    pub completed: Vec<u64>,
-    pub cancelled: Vec<u64>,
+    pub completed: Vec<LeaseReport>,
+    pub cancelled: Vec<LeaseReport>,
 }
 
 /// Heartbeat payload sent to the control plane.
@@ -406,11 +468,11 @@ impl AgentRuntime {
 
     fn apply_report(
         &mut self,
-        completed: &[u64],
-        cancelled: &[u64],
+        completed: &[LeaseReport],
+        cancelled: &[LeaseReport],
     ) -> Result<(), ControlPlaneError> {
-        for lease_id in completed.iter().chain(cancelled.iter()) {
-            self.lease_deadlines.remove(lease_id);
+        for lease in completed.iter().chain(cancelled.iter()) {
+            self.lease_deadlines.remove(&lease.lease_id);
         }
         Ok(())
     }
@@ -579,8 +641,8 @@ impl<T: ControlPlaneTransport> ControlPlaneClient<T> {
 
     pub async fn report(
         &self,
-        completed: Vec<u64>,
-        cancelled: Vec<u64>,
+        completed: Vec<LeaseReport>,
+        cancelled: Vec<LeaseReport>,
     ) -> Result<ReportResponse, ControlPlaneError> {
         let agent_id = {
             let runtime = self.inner.runtime.lock().await;
@@ -671,13 +733,34 @@ mod tests {
     fn report_request_serializes_completed() {
         let request = ReportRequest {
             agent_id: 99,
-            completed: vec![10, 20],
-            cancelled: vec![30],
+            completed: vec![
+                LeaseReport {
+                    lease_id: 10,
+                    observations: vec![Observation {
+                        name: "latency_ms".into(),
+                        value: serde_json::json!(12.5),
+                        unit: Some("ms".into()),
+                    }],
+                },
+                LeaseReport {
+                    lease_id: 20,
+                    observations: Vec::new(),
+                },
+            ],
+            cancelled: vec![LeaseReport {
+                lease_id: 30,
+                observations: Vec::new(),
+            }],
         };
         let json = serde_json::to_value(&request).expect("serialize report");
         assert_eq!(json["agent_id"], 99);
-        assert_eq!(json["completed"], serde_json::json!([10, 20]));
-        assert_eq!(json["cancelled"], serde_json::json!([30]));
+        assert_eq!(json["completed"][0]["lease_id"], 10);
+        assert_eq!(
+            json["completed"][0]["observations"][0]["name"],
+            "latency_ms"
+        );
+        assert_eq!(json["completed"][1]["lease_id"], 20);
+        assert_eq!(json["cancelled"][0]["lease_id"], 30);
     }
 
     #[test]

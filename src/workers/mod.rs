@@ -1,0 +1,567 @@
+use std::collections::HashMap;
+use std::env;
+use std::future::Future;
+use std::panic::AssertUnwindSafe;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
+use std::time::Instant;
+
+use anyhow::{anyhow, Context, Result};
+use async_trait::async_trait;
+use futures::future::{BoxFuture, FutureExt};
+use tokio::runtime::Builder;
+use tokio::sync::{mpsc, oneshot, Semaphore};
+use tokio::task::{JoinHandle, JoinSet};
+use tracing::{debug, error, info, warn};
+
+use crate::control_plane::{ControlPlaneClient, ControlPlaneTransport, Lease, TaskKind};
+use crate::dispatcher::{DispatchQueues, DispatchedLease};
+
+/// Trait that exposes the set of supported task kinds.
+trait TaskKindExt {
+    const ALL: [TaskKind; 5];
+}
+
+impl TaskKindExt for TaskKind {
+    const ALL: [TaskKind; 5] = [
+        TaskKind::Dns,
+        TaskKind::Http,
+        TaskKind::Tcp,
+        TaskKind::Ping,
+        TaskKind::Trace,
+    ];
+}
+
+/// Configuration for the worker pools used to execute leased tasks.
+#[derive(Clone, Debug)]
+pub struct WorkerPoolsConfig {
+    per_kind: HashMap<TaskKind, usize>,
+    trace_runtime_workers: usize,
+}
+
+impl WorkerPoolsConfig {
+    /// Creates a new configuration with sensible defaults.
+    pub fn new() -> Self {
+        let mut per_kind = HashMap::new();
+        per_kind.insert(TaskKind::Dns, 4);
+        per_kind.insert(TaskKind::Http, 2);
+        per_kind.insert(TaskKind::Tcp, 2);
+        per_kind.insert(TaskKind::Ping, 2);
+        per_kind.insert(TaskKind::Trace, 1);
+        Self {
+            per_kind,
+            trace_runtime_workers: 2,
+        }
+    }
+
+    /// Builds a configuration from environment variables.
+    pub fn from_env() -> Self {
+        let mut config = Self::new();
+        for kind in <TaskKind as TaskKindExt>::ALL {
+            let key = format!("AGENT_POOL_{}_SIZE", kind.to_string().to_uppercase());
+            if let Ok(value) = env::var(&key) {
+                if let Ok(parsed) = value.parse::<usize>() {
+                    if parsed > 0 {
+                        config.per_kind.insert(kind, parsed);
+                    }
+                }
+            }
+        }
+        if let Ok(value) = env::var("AGENT_TRACE_RUNTIME_WORKERS") {
+            if let Ok(parsed) = value.parse::<usize>() {
+                if parsed > 0 {
+                    config.trace_runtime_workers = parsed;
+                }
+            }
+        }
+        config
+    }
+
+    /// Returns the configured concurrency for a particular task kind.
+    pub fn concurrency(&self, kind: TaskKind) -> usize {
+        self.per_kind
+            .get(&kind)
+            .copied()
+            .filter(|value| *value > 0)
+            .unwrap_or(1)
+    }
+
+    /// Returns the number of worker threads allocated to the trace runtime.
+    pub fn trace_runtime_workers(&self) -> usize {
+        self.trace_runtime_workers.max(1)
+    }
+
+    /// Updates the concurrency for a task kind.
+    pub fn set_concurrency(&mut self, kind: TaskKind, value: usize) {
+        let value = value.max(1);
+        self.per_kind.insert(kind, value);
+    }
+}
+
+impl Default for WorkerPoolsConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Trait used to report completed leases back to the control plane.
+#[async_trait]
+pub trait ReportSink: Clone + Send + Sync + 'static {
+    async fn report(&self, completed: Vec<u64>) -> Result<()>;
+}
+
+#[async_trait]
+impl<T> ReportSink for ControlPlaneClient<T>
+where
+    T: ControlPlaneTransport + Send + Sync + 'static,
+{
+    async fn report(&self, completed: Vec<u64>) -> Result<()> {
+        let _ = <ControlPlaneClient<T>>::report(self, completed)
+            .await
+            .map_err(|err| anyhow!(err))?;
+        Ok(())
+    }
+}
+
+/// Trait implemented by worker handlers for each task type.
+#[async_trait]
+pub trait WorkerHandler: Send + Sync {
+    async fn handle(&self, lease: Lease) -> Result<WorkerReport>;
+}
+
+/// Outcome reported by worker handlers.
+#[derive(Debug)]
+pub struct WorkerReport {
+    completed: Vec<u64>,
+}
+
+impl WorkerReport {
+    pub fn completed(lease_id: u64) -> Self {
+        Self {
+            completed: vec![lease_id],
+        }
+    }
+
+    pub fn completed_many(ids: Vec<u64>) -> Self {
+        Self { completed: ids }
+    }
+
+    pub fn into_completed(self) -> Vec<u64> {
+        self.completed
+    }
+}
+
+/// Container struct that stores handlers for each task kind.
+#[derive(Clone)]
+pub struct WorkerHandlers {
+    pub dns: Arc<dyn WorkerHandler>,
+    pub http: Arc<dyn WorkerHandler>,
+    pub tcp: Arc<dyn WorkerHandler>,
+    pub ping: Arc<dyn WorkerHandler>,
+    pub trace: Arc<dyn WorkerHandler>,
+}
+
+impl WorkerHandlers {
+    pub fn new(
+        dns: Arc<dyn WorkerHandler>,
+        http: Arc<dyn WorkerHandler>,
+        tcp: Arc<dyn WorkerHandler>,
+        ping: Arc<dyn WorkerHandler>,
+        trace: Arc<dyn WorkerHandler>,
+    ) -> Self {
+        Self {
+            dns,
+            http,
+            tcp,
+            ping,
+            trace,
+        }
+    }
+
+    pub fn default_handlers() -> Self {
+        Self {
+            dns: Arc::new(DnsWorker::default()),
+            http: Arc::new(HttpWorker::default()),
+            tcp: Arc::new(TcpWorker::default()),
+            ping: Arc::new(PingWorker::default()),
+            trace: Arc::new(TraceWorker::default()),
+        }
+    }
+}
+
+impl Default for WorkerHandlers {
+    fn default() -> Self {
+        Self::default_handlers()
+    }
+}
+
+/// Handle returned to manage the lifecycle of worker pools.
+pub struct WorkerPoolsHandle {
+    joins: Vec<JoinHandle<()>>,
+    trace_guard: Option<TraceRuntimeGuard>,
+}
+
+impl WorkerPoolsHandle {
+    pub async fn shutdown(self) {
+        for join in self.joins {
+            if let Err(err) = join.await {
+                if err.is_panic() {
+                    error!("worker pool task panicked during shutdown");
+                }
+            }
+        }
+        if let Some(guard) = self.trace_guard {
+            guard.shutdown().await;
+        }
+    }
+}
+
+/// Spawns worker pools for each task kind, wiring them to their corresponding queues.
+pub fn spawn_worker_pools<R>(
+    config: WorkerPoolsConfig,
+    queues: DispatchQueues,
+    handlers: WorkerHandlers,
+    reporter: R,
+) -> Result<WorkerPoolsHandle>
+where
+    R: ReportSink,
+{
+    let WorkerHandlers {
+        dns,
+        http,
+        tcp,
+        ping,
+        trace,
+    } = handlers;
+
+    let DispatchQueues {
+        dns: dns_queue,
+        http: http_queue,
+        tcp: tcp_queue,
+        ping: ping_queue,
+        trace: trace_queue,
+    } = queues;
+
+    let mut joins = Vec::new();
+
+    let reporter_http = reporter.clone();
+    let reporter_tcp = reporter.clone();
+    let reporter_ping = reporter.clone();
+    let reporter_trace = reporter.clone();
+
+    joins.push(spawn_pool(
+        "dns",
+        dns_queue,
+        dns,
+        reporter,
+        config.concurrency(TaskKind::Dns),
+        None,
+    ));
+
+    joins.push(spawn_pool(
+        "http",
+        http_queue,
+        http,
+        reporter_http,
+        config.concurrency(TaskKind::Http),
+        None,
+    ));
+
+    joins.push(spawn_pool(
+        "tcp",
+        tcp_queue,
+        tcp,
+        reporter_tcp,
+        config.concurrency(TaskKind::Tcp),
+        None,
+    ));
+
+    joins.push(spawn_pool(
+        "ping",
+        ping_queue,
+        ping,
+        reporter_ping,
+        config.concurrency(TaskKind::Ping),
+        None,
+    ));
+
+    let (trace_runtime, trace_guard) = TraceRuntime::new(config.trace_runtime_workers())?;
+    joins.push(spawn_pool(
+        "trace",
+        trace_queue,
+        trace,
+        reporter_trace,
+        config.concurrency(TaskKind::Trace),
+        Some(trace_runtime),
+    ));
+
+    Ok(WorkerPoolsHandle {
+        joins,
+        trace_guard: Some(trace_guard),
+    })
+}
+
+fn spawn_pool<R>(
+    label: &'static str,
+    mut queue: mpsc::Receiver<DispatchedLease>,
+    handler: Arc<dyn WorkerHandler>,
+    reporter: R,
+    concurrency: usize,
+    trace_runtime: Option<TraceRuntime>,
+) -> JoinHandle<()>
+where
+    R: ReportSink,
+{
+    let concurrency = concurrency.max(1);
+    let semaphore = Arc::new(Semaphore::new(concurrency));
+    tokio::spawn(async move {
+        let mut joinset = JoinSet::new();
+        let inflight_gauge = Arc::new(AtomicUsize::new(0));
+        while let Some(item) = queue.recv().await {
+            let permit = match semaphore.clone().acquire_owned().await {
+                Ok(permit) => permit,
+                Err(_) => break,
+            };
+            let tracker = Arc::clone(&inflight_gauge);
+            let handler = Arc::clone(&handler);
+            let reporter = reporter.clone();
+            let runtime = trace_runtime.clone();
+            let lease = item.into_lease();
+            let start = Instant::now();
+            tracker.fetch_add(1, Ordering::SeqCst);
+            metrics::gauge!("workers.inflight", "kind" => label)
+                .set(tracker.load(Ordering::SeqCst) as f64);
+
+            let task = async move {
+                let result = AssertUnwindSafe(handler.handle(lease)).catch_unwind().await;
+                match result {
+                    Ok(Ok(report)) => {
+                        metrics::counter!("workers.completed", "kind" => label).increment(1);
+                        if let Err(err) = reporter.report(report.into_completed()).await {
+                            warn!(error = %err, kind = label, "failed to report completed lease");
+                        }
+                    }
+                    Ok(Err(err)) => {
+                        metrics::counter!("workers.errors", "kind" => label).increment(1);
+                        warn!(error = %err, kind = label, "worker handler returned error");
+                    }
+                    Err(panic) => {
+                        metrics::counter!("workers.panics", "kind" => label).increment(1);
+                        error!(kind = label, "worker panicked: {:?}", panic);
+                    }
+                }
+                metrics::histogram!("workers.latency", "kind" => label)
+                    .record(start.elapsed().as_secs_f64());
+                drop(permit);
+                tracker.fetch_sub(1, Ordering::SeqCst);
+                metrics::gauge!("workers.inflight", "kind" => label)
+                    .set(tracker.load(Ordering::SeqCst) as f64);
+            };
+
+            joinset.spawn(async move {
+                if let Some(runtime) = runtime {
+                    if let Err(err) = runtime.spawn(task).await {
+                        warn!(error = %err, kind = label, "trace runtime failed to spawn task");
+                    }
+                } else {
+                    let _ = task.await;
+                }
+            });
+        }
+        drop(queue);
+        while let Some(result) = joinset.join_next().await {
+            if let Err(err) = result {
+                if err.is_panic() {
+                    error!(kind = label, "worker join panicked");
+                }
+            }
+        }
+    })
+}
+
+/// Default worker implementation for DNS checks.
+#[derive(Default)]
+pub struct DnsWorker;
+
+#[async_trait]
+impl WorkerHandler for DnsWorker {
+    async fn handle(&self, lease: Lease) -> Result<WorkerReport> {
+        debug!(lease_id = lease.lease_id, kind = ?lease.kind, "processing DNS lease");
+        Ok(WorkerReport::completed(lease.lease_id))
+    }
+}
+
+/// Default worker implementation for HTTP checks.
+#[derive(Default)]
+pub struct HttpWorker;
+
+#[async_trait]
+impl WorkerHandler for HttpWorker {
+    async fn handle(&self, lease: Lease) -> Result<WorkerReport> {
+        debug!(lease_id = lease.lease_id, kind = ?lease.kind, "processing HTTP lease");
+        Ok(WorkerReport::completed(lease.lease_id))
+    }
+}
+
+/// Default worker implementation for TCP checks.
+#[derive(Default)]
+pub struct TcpWorker;
+
+#[async_trait]
+impl WorkerHandler for TcpWorker {
+    async fn handle(&self, lease: Lease) -> Result<WorkerReport> {
+        debug!(lease_id = lease.lease_id, kind = ?lease.kind, "processing TCP lease");
+        Ok(WorkerReport::completed(lease.lease_id))
+    }
+}
+
+/// Default worker implementation for Ping checks.
+#[derive(Default)]
+pub struct PingWorker;
+
+#[async_trait]
+impl WorkerHandler for PingWorker {
+    async fn handle(&self, lease: Lease) -> Result<WorkerReport> {
+        debug!(lease_id = lease.lease_id, kind = ?lease.kind, "processing Ping lease");
+        Ok(WorkerReport::completed(lease.lease_id))
+    }
+}
+
+/// Default worker implementation for Traceroute checks.
+#[derive(Default)]
+pub struct TraceWorker;
+
+#[async_trait]
+impl WorkerHandler for TraceWorker {
+    async fn handle(&self, lease: Lease) -> Result<WorkerReport> {
+        info!(lease_id = lease.lease_id, kind = ?lease.kind, "processing Trace lease");
+        Ok(WorkerReport::completed(lease.lease_id))
+    }
+}
+
+#[derive(Clone)]
+struct TraceRuntime {
+    inner: Arc<TraceRuntimeInner>,
+}
+
+struct TraceRuntimeInner {
+    tx: mpsc::Sender<TraceCommand>,
+}
+
+pub struct TraceRuntimeGuard {
+    tx: mpsc::Sender<TraceCommand>,
+    shutdown: Option<oneshot::Sender<()>>,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
+enum TraceCommand {
+    Run { task: BoxFuture<'static, ()> },
+    Shutdown,
+}
+
+impl TraceRuntime {
+    fn new(worker_threads: usize) -> Result<(Self, TraceRuntimeGuard)> {
+        let runtime = Builder::new_multi_thread()
+            .enable_all()
+            .worker_threads(worker_threads)
+            .thread_name("trace-worker")
+            .build()
+            .context("failed to initialize trace runtime")?;
+        let (tx, rx) = mpsc::channel::<TraceCommand>(worker_threads.max(1) * 4);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+        let join = std::thread::spawn(move || {
+            runtime.block_on(run_trace_runtime(rx, shutdown_rx));
+        });
+
+        let guard = TraceRuntimeGuard {
+            tx: tx.clone(),
+            shutdown: Some(shutdown_tx),
+            join: Some(join),
+        };
+
+        let inner = TraceRuntimeInner { tx };
+        Ok((
+            TraceRuntime {
+                inner: Arc::new(inner),
+            },
+            guard,
+        ))
+    }
+
+    async fn spawn(
+        &self,
+        task: impl Future<Output = ()> + Send + 'static,
+    ) -> Result<(), TraceRuntimeError> {
+        let (done_tx, done_rx) = oneshot::channel();
+        let task = async move {
+            task.await;
+            let _ = done_tx.send(());
+        };
+        self.inner
+            .tx
+            .send(TraceCommand::Run {
+                task: Box::pin(task),
+            })
+            .await
+            .map_err(|_| TraceRuntimeError::ChannelClosed)?;
+        done_rx
+            .await
+            .map_err(|_| TraceRuntimeError::ChannelClosed)?;
+        Ok(())
+    }
+}
+
+impl TraceRuntimeGuard {
+    async fn shutdown(mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        let _ = self.tx.send(TraceCommand::Shutdown).await;
+        if let Some(join) = self.join.take() {
+            let _ = tokio::task::spawn_blocking(move || {
+                let _ = join.join();
+            })
+            .await;
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum TraceRuntimeError {
+    #[error("trace runtime channel closed")]
+    ChannelClosed,
+}
+
+async fn run_trace_runtime(
+    mut rx: mpsc::Receiver<TraceCommand>,
+    mut shutdown: oneshot::Receiver<()>,
+) {
+    let mut joinset = JoinSet::new();
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => {
+                break;
+            }
+            Some(cmd) = rx.recv() => {
+                match cmd {
+                    TraceCommand::Run { task } => {
+                        joinset.spawn(task);
+                    }
+                    TraceCommand::Shutdown => break,
+                }
+            }
+            else => break,
+        }
+    }
+    drop(rx);
+    while let Some(result) = joinset.join_next().await {
+        if let Err(err) = result {
+            if err.is_panic() {
+                error!("trace runtime task panicked");
+            }
+        }
+    }
+}

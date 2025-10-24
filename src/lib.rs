@@ -1,3 +1,4 @@
+pub mod concurrency;
 pub mod control_plane;
 pub mod dispatcher;
 pub mod workers;

@@ -12,10 +12,11 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use futures::future::{BoxFuture, FutureExt};
 use tokio::runtime::Builder;
-use tokio::sync::{mpsc, oneshot, Semaphore};
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinHandle, JoinSet};
 use tracing::{debug, error, info, warn};
 
+use crate::concurrency::{ConcurrencyController, ConcurrencyLimits};
 use crate::control_plane::{ControlPlaneClient, ControlPlaneTransport, Lease, TaskKind};
 use crate::dispatcher::{DispatchQueues, DispatchedLease};
 
@@ -97,6 +98,12 @@ impl WorkerPoolsConfig {
     pub fn set_concurrency(&mut self, kind: TaskKind, value: usize) {
         let value = value.max(1);
         self.per_kind.insert(kind, value);
+    }
+
+    pub fn concurrency_limits(&self) -> ConcurrencyLimits {
+        let per_kind = self.per_kind.clone();
+        let global = per_kind.values().copied().sum::<usize>().max(1);
+        ConcurrencyLimits::new(per_kind, global)
     }
 }
 
@@ -251,49 +258,56 @@ where
     let reporter_ping = reporter.clone();
     let reporter_trace = reporter.clone();
 
+    let controller = ConcurrencyController::new(config.concurrency_limits());
+
     joins.push(spawn_pool(
         "dns",
+        TaskKind::Dns,
         dns_queue,
         dns,
         reporter,
-        config.concurrency(TaskKind::Dns),
+        controller.clone(),
         None,
     ));
 
     joins.push(spawn_pool(
         "http",
+        TaskKind::Http,
         http_queue,
         http,
         reporter_http,
-        config.concurrency(TaskKind::Http),
+        controller.clone(),
         None,
     ));
 
     joins.push(spawn_pool(
         "tcp",
+        TaskKind::Tcp,
         tcp_queue,
         tcp,
         reporter_tcp,
-        config.concurrency(TaskKind::Tcp),
+        controller.clone(),
         None,
     ));
 
     joins.push(spawn_pool(
         "ping",
+        TaskKind::Ping,
         ping_queue,
         ping,
         reporter_ping,
-        config.concurrency(TaskKind::Ping),
+        controller.clone(),
         None,
     ));
 
     let (trace_runtime, trace_guard) = TraceRuntime::new(config.trace_runtime_workers())?;
     joins.push(spawn_pool(
         "trace",
+        TaskKind::Trace,
         trace_queue,
         trace,
         reporter_trace,
-        config.concurrency(TaskKind::Trace),
+        controller,
         Some(trace_runtime),
     ));
 
@@ -305,30 +319,28 @@ where
 
 fn spawn_pool<R>(
     label: &'static str,
+    kind: TaskKind,
     mut queue: mpsc::Receiver<DispatchedLease>,
     handler: Arc<dyn WorkerHandler>,
     reporter: R,
-    concurrency: usize,
+    controller: ConcurrencyController,
     trace_runtime: Option<TraceRuntime>,
 ) -> JoinHandle<()>
 where
     R: ReportSink,
 {
-    let concurrency = concurrency.max(1);
-    let semaphore = Arc::new(Semaphore::new(concurrency));
     tokio::spawn(async move {
         let mut joinset = JoinSet::new();
         let inflight_gauge = Arc::new(AtomicUsize::new(0));
         while let Some(item) = queue.recv().await {
-            let permit = match semaphore.clone().acquire_owned().await {
-                Ok(permit) => permit,
-                Err(_) => break,
-            };
+            let lease = item.into_lease();
+            let target = lease.task_id;
+            let controller_for_task = controller.clone();
+            let permit = controller_for_task.acquire(kind, target).await;
             let tracker = Arc::clone(&inflight_gauge);
             let handler = Arc::clone(&handler);
             let reporter = reporter.clone();
             let runtime = trace_runtime.clone();
-            let lease = item.into_lease();
             let start = Instant::now();
             tracker.fetch_add(1, Ordering::SeqCst);
             metrics::gauge!("workers.inflight", "kind" => label)
@@ -338,16 +350,19 @@ where
                 let result = AssertUnwindSafe(handler.handle(lease)).catch_unwind().await;
                 match result {
                     Ok(Ok(report)) => {
+                        controller_for_task.record_success(kind, target);
                         metrics::counter!("workers.completed", "kind" => label).increment(1);
                         if let Err(err) = reporter.report(report.into_completed()).await {
                             warn!(error = %err, kind = label, "failed to report completed lease");
                         }
                     }
                     Ok(Err(err)) => {
+                        controller_for_task.record_error(kind, target);
                         metrics::counter!("workers.errors", "kind" => label).increment(1);
                         warn!(error = %err, kind = label, "worker handler returned error");
                     }
                     Err(panic) => {
+                        controller_for_task.record_error(kind, target);
                         metrics::counter!("workers.panics", "kind" => label).increment(1);
                         error!(kind = label, "worker panicked: {:?}", panic);
                     }

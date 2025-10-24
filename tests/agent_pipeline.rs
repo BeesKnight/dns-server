@@ -195,3 +195,48 @@ worker_test!(load_metrics_with_thousands_of_tasks, {
         "unexpected growth in active leases"
     );
 });
+
+worker_test!(pipeline_handles_backend_cancellation, {
+    let (backend, control, driver) = MockBackend::new();
+
+    let mut config = AgentPipelineConfig::new(4);
+    config.extend_every = Duration::from_millis(20);
+    config.extend_by = Duration::from_millis(60);
+    config
+        .processing_latency
+        .insert(TaskType::Dns, Duration::from_millis(100));
+    config.per_type_concurrency.insert(TaskType::Dns, 1);
+
+    let mut counts = HashMap::new();
+    counts.insert(TaskType::Dns, 1);
+    let tasks = build_tasks(&counts);
+    control.enqueue_many(tasks.clone()).await;
+
+    let pipeline = AgentPipeline::spawn(backend.clone(), config.clone());
+    let stats_handle = pipeline.stats();
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    control.update_behavior(|behavior| {
+        behavior.revoked_tasks.insert(1);
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if stats_handle.total_cancelled() >= 1 {
+            break;
+        }
+        if Instant::now() > deadline {
+            panic!("cancellation was not observed");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let stats = pipeline.shutdown().await;
+    let snapshot = control.snapshot().await;
+    control.shutdown().await;
+    let _ = driver.await;
+
+    assert_eq!(stats.total_cancelled(), 1, "expected one cancelled task");
+    assert_eq!(stats.total_completed(), 0, "no task should complete");
+    assert!(snapshot.active_leases.is_empty());
+});

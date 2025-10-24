@@ -96,6 +96,7 @@ pub struct ExtendRequest {
 pub struct ReportRequest {
     pub agent_id: u64,
     pub completed: Vec<u64>,
+    pub cancelled: Vec<u64>,
 }
 
 /// Heartbeat payload sent to the control plane.
@@ -403,8 +404,12 @@ impl AgentRuntime {
         Ok(())
     }
 
-    fn apply_report(&mut self, completed: &[u64]) -> Result<(), ControlPlaneError> {
-        for lease_id in completed {
+    fn apply_report(
+        &mut self,
+        completed: &[u64],
+        cancelled: &[u64],
+    ) -> Result<(), ControlPlaneError> {
+        for lease_id in completed.iter().chain(cancelled.iter()) {
             self.lease_deadlines.remove(lease_id);
         }
         Ok(())
@@ -572,7 +577,11 @@ impl<T: ControlPlaneTransport> ControlPlaneClient<T> {
         }
     }
 
-    pub async fn report(&self, completed: Vec<u64>) -> Result<ReportResponse, ControlPlaneError> {
+    pub async fn report(
+        &self,
+        completed: Vec<u64>,
+        cancelled: Vec<u64>,
+    ) -> Result<ReportResponse, ControlPlaneError> {
         let agent_id = {
             let runtime = self.inner.runtime.lock().await;
             runtime.agent_id()?
@@ -580,6 +589,7 @@ impl<T: ControlPlaneTransport> ControlPlaneClient<T> {
         let request = ReportRequest {
             agent_id,
             completed,
+            cancelled,
         };
         loop {
             let response = self.inner.transport.report(&request).await;
@@ -587,7 +597,8 @@ impl<T: ControlPlaneTransport> ControlPlaneClient<T> {
                 Ok(payload) => {
                     let mut runtime = self.inner.runtime.lock().await;
                     let completed = request.completed.clone();
-                    runtime.apply_report(&completed)?;
+                    let cancelled = request.cancelled.clone();
+                    runtime.apply_report(&completed, &cancelled)?;
                     runtime.record_success(AgentOperation::Report);
                     return Ok(payload);
                 }
@@ -661,10 +672,12 @@ mod tests {
         let request = ReportRequest {
             agent_id: 99,
             completed: vec![10, 20],
+            cancelled: vec![30],
         };
         let json = serde_json::to_value(&request).expect("serialize report");
         assert_eq!(json["agent_id"], 99);
         assert_eq!(json["completed"], serde_json::json!([10, 20]));
+        assert_eq!(json["cancelled"], serde_json::json!([30]));
     }
 
     #[test]

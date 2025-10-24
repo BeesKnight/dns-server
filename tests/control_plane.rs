@@ -119,11 +119,12 @@ impl ControlPlaneTransport for MockBackendTransport {
             .report(support::ReportRequest {
                 agent_id: support::AgentId(request.agent_id),
                 completed: request.completed.clone(),
+                cancelled: request.cancelled.clone(),
             })
             .await
             .map_err(|err| TransportError::Backend(err.to_string()))?;
         Ok(ReportResponse {
-            acknowledged: request.completed.len(),
+            acknowledged: request.completed.len() + request.cancelled.len(),
         })
     }
 }
@@ -179,7 +180,7 @@ async fn client_handles_lease_lifecycle() -> Result<(), ControlPlaneError> {
         .await?;
     assert_eq!(outcomes.len(), lease_ids.len());
 
-    let report = client.report(lease_ids.clone()).await?;
+    let report = client.report(lease_ids.clone(), Vec::new()).await?;
     assert_eq!(report.acknowledged, lease_ids.len());
 
     let heartbeat = client.heartbeat().await?;

@@ -1,16 +1,20 @@
 use std::time::Duration;
 
 use codecrafters_dns_server::control_plane::{Lease, TaskKind};
-use codecrafters_dns_server::dispatcher::{spawn_dispatcher, DispatchQueues, DispatcherConfig};
+use codecrafters_dns_server::dispatcher::{
+    spawn_dispatcher, DispatchQueues, DispatcherConfig, LeaseAssignment,
+};
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 
-fn test_lease(id: u64, kind: TaskKind) -> Lease {
-    Lease {
+fn test_assignment(id: u64, kind: TaskKind) -> LeaseAssignment {
+    let lease = Lease {
         lease_id: id,
         task_id: id,
         kind,
         lease_until_ms: 0,
-    }
+    };
+    LeaseAssignment::new(lease, CancellationToken::new())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -31,14 +35,14 @@ async fn dispatcher_backpressure_recovers_when_capacity_frees() {
     assert!(!*backpressure.borrow());
 
     dispatcher
-        .dispatch(test_lease(1, TaskKind::Dns))
+        .dispatch(test_assignment(1, TaskKind::Dns))
         .await
         .expect("first lease accepted");
 
     let dispatcher_clone = dispatcher.clone();
     let send_task = tokio::spawn(async move {
         dispatcher_clone
-            .dispatch(test_lease(2, TaskKind::Dns))
+            .dispatch(test_assignment(2, TaskKind::Dns))
             .await
             .expect("second lease accepted");
     });
@@ -66,8 +70,8 @@ async fn dispatcher_backpressure_recovers_when_capacity_frees() {
     } = queues;
     // drain the first lease which should allow the second dispatch to proceed
     let first = dns.recv().await.expect("dns queue closed unexpectedly");
-    assert_eq!(first.lease().lease_id, 1);
-    let _ = first.into_lease();
+    assert_eq!(first.assignment().lease().lease_id, 1);
+    let _ = first.into_assignment();
 
     send_task.await.expect("dispatch task joined");
 
@@ -76,8 +80,8 @@ async fn dispatcher_backpressure_recovers_when_capacity_frees() {
         .recv()
         .await
         .expect("dns queue closed before second lease");
-    assert_eq!(second.lease().lease_id, 2);
-    let _ = second.into_lease();
+    assert_eq!(second.assignment().lease().lease_id, 2);
+    let _ = second.into_assignment();
 
     // Wait for backpressure to clear once there is capacity again.
     let deadline = Instant::now() + Duration::from_secs(1);

@@ -41,7 +41,7 @@ worker_test!(batch_lease_protocol_is_respected, {
     let tasks = build_tasks(&counts);
     control.enqueue_many(tasks.clone()).await;
 
-    let pipeline = AgentPipeline::spawn(backend.clone(), config);
+    let pipeline = AgentPipeline::spawn(backend.clone(), config.clone());
     pipeline
         .wait_for_total(tasks.len() as u64, Duration::from_secs(5))
         .await;
@@ -95,7 +95,7 @@ worker_test!(queue_distribution_and_backpressure, {
     let tasks = build_tasks(&counts);
     control.enqueue_many(tasks.clone()).await;
 
-    let pipeline = AgentPipeline::spawn(backend.clone(), config);
+    let pipeline = AgentPipeline::spawn(backend.clone(), config.clone());
     pipeline
         .wait_for_total(tasks.len() as u64, Duration::from_secs(5))
         .await;
@@ -145,7 +145,7 @@ worker_test!(load_metrics_with_thousands_of_tasks, {
     let tasks = build_tasks(&counts);
     control.enqueue_many(tasks.clone()).await;
 
-    let pipeline = AgentPipeline::spawn(backend.clone(), config);
+    let pipeline = AgentPipeline::spawn(backend.clone(), config.clone());
     let stats_handle = pipeline.stats();
     let deadline = Instant::now() + Duration::from_secs(45);
     loop {
@@ -168,6 +168,22 @@ worker_test!(load_metrics_with_thousands_of_tasks, {
     let _ = driver.await;
 
     assert_eq!(stats.total_completed(), tasks.len() as u64);
+    for kind in TaskType::ALL {
+        let configured = config.per_type_concurrency.get(&kind).copied().unwrap_or(0);
+        assert!(
+            stats.peak_inflight(kind) <= configured,
+            "kind {:?} exceeded stabilized window: peak {} > {}",
+            kind,
+            stats.peak_inflight(kind),
+            configured
+        );
+        assert_eq!(
+            stats.per_type_completed(kind),
+            *counts.get(&kind).unwrap_or(&0) as u64,
+            "kind {:?} did not respect throughput SLA",
+            kind,
+        );
+    }
     assert!(snapshot.pending.values().all(|queue| queue.is_empty()));
     let histogram = stats.histogram();
     let p50 = Duration::from_micros(histogram.value_at_quantile(0.50));

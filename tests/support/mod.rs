@@ -9,10 +9,15 @@ use hdrhistogram::Histogram;
 use thiserror::Error;
 use tokio::{
     select,
-    sync::{mpsc, oneshot, watch, Notify, OwnedSemaphorePermit, Semaphore},
+    sync::{mpsc, oneshot, watch, Notify},
     task::JoinHandle,
     time::{self, Instant, MissedTickBehavior},
 };
+
+use codecrafters_dns_server::concurrency::{
+    ConcurrencyController, ConcurrencyLimits, ConcurrencyPermit,
+};
+use codecrafters_dns_server::control_plane::TaskKind;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub enum TaskType {
@@ -31,6 +36,18 @@ impl TaskType {
         TaskType::Ping,
         TaskType::Trace,
     ];
+}
+
+impl From<TaskType> for TaskKind {
+    fn from(value: TaskType) -> Self {
+        match value {
+            TaskType::Dns => TaskKind::Dns,
+            TaskType::Http => TaskKind::Http,
+            TaskType::Tcp => TaskKind::Tcp,
+            TaskType::Ping => TaskKind::Ping,
+            TaskType::Trace => TaskKind::Trace,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -532,6 +549,7 @@ impl MockBackendDriver {
     }
 }
 
+#[derive(Clone)]
 pub struct AgentPipelineConfig {
     pub claim_batch_size: usize,
     pub extend_every: Duration,
@@ -564,7 +582,7 @@ impl AgentPipelineConfig {
 
 struct WorkerCommand {
     lease: LeasedTask,
-    permit: OwnedSemaphorePermit,
+    permit: ConcurrencyPermit,
 }
 
 async fn process_task(
@@ -813,7 +831,17 @@ impl AgentPipeline {
 
         let mut worker_handles = Vec::new();
         let mut worker_senders = HashMap::new();
-        let mut semaphores = HashMap::new();
+
+        let per_kind_limits: HashMap<TaskKind, usize> = config
+            .per_type_concurrency
+            .iter()
+            .map(|(kind, limit)| ((*kind).into(), *limit))
+            .collect();
+        let global_limit = per_kind_limits.values().copied().sum::<usize>().max(1);
+        let controller = ConcurrencyController::new(ConcurrencyLimits::new(
+            per_kind_limits.clone(),
+            global_limit,
+        ));
 
         for (&kind, &concurrency) in &config.per_type_concurrency {
             let (tx, mut rx) = mpsc::channel::<WorkerCommand>(concurrency * 4);
@@ -856,7 +884,6 @@ impl AgentPipeline {
                 }
             });
             worker_handles.push(handle);
-            semaphores.insert(kind, Arc::new(Semaphore::new(concurrency)));
         }
 
         let backend_clone = backend.clone();
@@ -890,7 +917,7 @@ impl AgentPipeline {
             let backend = backend.clone();
             let mut shutdown_rx = shutdown_rx.clone();
             let worker_senders = worker_senders.clone();
-            let semaphores = semaphores.clone();
+            let controller = controller.clone();
             let notify = notify.clone();
             tokio::spawn(async move {
                 let registration = backend.register().await.expect("register succeeded");
@@ -903,12 +930,10 @@ impl AgentPipeline {
                     let mut capacities: BTreeMap<TaskType, usize> = BTreeMap::new();
                     let mut total = 0usize;
                     for kind in TaskType::ALL {
-                        if let Some(semaphore) = semaphores.get(&kind) {
-                            let available = semaphore.available_permits();
-                            if available > 0 {
-                                capacities.insert(kind, available);
-                                total += available;
-                            }
+                        let available = controller.available(kind.into());
+                        if available > 0 {
+                            capacities.insert(kind, available);
+                            total += available;
                         }
                     }
                     if capacities.is_empty() {
@@ -952,13 +977,12 @@ impl AgentPipeline {
                                 continue;
                             }
                             for lease in batch.leases {
-                                if let Some(semaphore) = semaphores.get(&lease.task.kind) {
-                                    if let Ok(permit) = semaphore.clone().try_acquire_owned() {
-                                        if let Some(sender) = worker_senders.get(&lease.task.kind) {
-                                            let _ =
-                                                sender.send(WorkerCommand { lease, permit }).await;
-                                        }
-                                    }
+                                if let Some(sender) = worker_senders.get(&lease.task.kind) {
+                                    let task_kind: TaskKind = lease.task.kind.into();
+                                    let controller_clone = controller.clone();
+                                    let permit =
+                                        controller_clone.acquire(task_kind, lease.task.id).await;
+                                    let _ = sender.send(WorkerCommand { lease, permit }).await;
                                 }
                             }
                         }

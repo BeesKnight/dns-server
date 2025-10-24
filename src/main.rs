@@ -1,11 +1,14 @@
-use std::{env, net::SocketAddr, sync::Arc, time::Duration};
+use std::{collections::HashMap, env, net::SocketAddr, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
-use codecrafters_dns_server::BytePacketBuf;
+use codecrafters_dns_server::{
+    control_plane::{ControlPlaneClient, HttpControlPlaneTransport, RegisterRequest, TaskKind},
+    BytePacketBuf,
+};
 use tokio::{
     net::UdpSocket,
-    sync::Semaphore,
-    time::{timeout, Instant},
+    sync::{mpsc, Semaphore},
+    time::{interval, sleep, timeout, Instant, MissedTickBehavior},
 };
 use tracing::{debug, info, warn};
 
@@ -68,6 +71,24 @@ async fn main() -> Result<()> {
     );
 
     let concurrency_limit = Arc::new(Semaphore::new(config.max_inflight_requests));
+
+    if let Ok(base_url) = env::var("AGENT_CONTROL_PLANE") {
+        match HttpControlPlaneTransport::new(&base_url) {
+            Ok(transport) => {
+                let client = ControlPlaneClient::new(transport);
+                let (batch_tx, mut batch_rx) = mpsc::channel::<Vec<u64>>(32);
+                tokio::spawn(async move {
+                    while let Some(batch) = batch_rx.recv().await {
+                        info!(leases = batch.len(), "dispatcher received batch");
+                    }
+                });
+                tokio::spawn(run_control_plane(client, batch_tx));
+            }
+            Err(err) => {
+                warn!(error = %err, "failed to initialize control plane client");
+            }
+        }
+    }
 
     loop {
         let mut request_buffer = BytePacketBuf::new();
@@ -155,4 +176,74 @@ async fn handle_request(
     );
 
     Ok(())
+}
+
+async fn run_control_plane<T>(client: ControlPlaneClient<T>, batch_tx: mpsc::Sender<Vec<u64>>)
+where
+    T: codecrafters_dns_server::control_plane::ControlPlaneTransport + 'static,
+{
+    if let Err(err) = client
+        .register(RegisterRequest {
+            hostname: hostname::get()
+                .ok()
+                .and_then(|value| value.into_string().ok()),
+        })
+        .await
+    {
+        warn!(error = %err, "control plane registration failed");
+        return;
+    }
+
+    let heartbeat_client = client.clone();
+    tokio::spawn(async move {
+        let mut ticker = interval(Duration::from_secs(5));
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            if let Err(err) = heartbeat_client.heartbeat().await {
+                warn!(error = %err, "heartbeat failed");
+            }
+        }
+    });
+
+    let extend_client = client.clone();
+    tokio::spawn(async move {
+        let mut ticker = interval(Duration::from_secs(2));
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            let snapshot = extend_client.snapshot().await;
+            if snapshot.leases.is_empty() {
+                continue;
+            }
+            let lease_ids: Vec<u64> = snapshot.leases.keys().copied().collect();
+            if let Err(err) = extend_client
+                .extend(lease_ids, Duration::from_millis(500))
+                .await
+            {
+                warn!(error = %err, "lease extension failed");
+            }
+        }
+    });
+
+    let mut capacities = HashMap::new();
+    capacities.insert(TaskKind::Dns, 4);
+    loop {
+        match client.claim(&capacities).await {
+            Ok(batch) => {
+                if batch.leases.is_empty() {
+                    sleep(Duration::from_millis(250)).await;
+                    continue;
+                }
+                let lease_ids: Vec<u64> = batch.leases.iter().map(|lease| lease.lease_id).collect();
+                if batch_tx.send(lease_ids).await.is_err() {
+                    break;
+                }
+            }
+            Err(err) => {
+                warn!(error = %err, "claim loop failed");
+                sleep(Duration::from_secs(1)).await;
+            }
+        }
+    }
 }

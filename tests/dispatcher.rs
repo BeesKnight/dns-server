@@ -1,6 +1,8 @@
 use std::time::Duration;
 
-use codecrafters_dns_server::control_plane::{Lease, TaskKind};
+use codecrafters_dns_server::control_plane::{
+    Lease, PingSpec, TaskKind, TaskSpec, TcpSpec, TraceSpec,
+};
 use codecrafters_dns_server::dispatcher::{
     spawn_dispatcher, DispatchQueues, DispatcherConfig, LeaseAssignment,
 };
@@ -13,8 +15,34 @@ fn test_assignment(id: u64, kind: TaskKind) -> LeaseAssignment {
         task_id: id,
         kind,
         lease_until_ms: 0,
+        spec: dummy_spec(kind, id),
     };
     LeaseAssignment::new(lease, CancellationToken::new())
+}
+
+fn dummy_spec(kind: TaskKind, id: u64) -> TaskSpec {
+    match kind {
+        TaskKind::Dns => TaskSpec::Dns {
+            query: format!("example-{id}.com"),
+            server: None,
+        },
+        TaskKind::Http => TaskSpec::Http {
+            url: format!("https://example.com/{id}"),
+            method: Some("GET".into()),
+        },
+        TaskKind::Tcp => TaskSpec::Tcp(TcpSpec {
+            host: "127.0.0.1".into(),
+            port: 80,
+        }),
+        TaskKind::Ping => TaskSpec::Ping(PingSpec {
+            host: "127.0.0.1".into(),
+            count: Some(3),
+        }),
+        TaskKind::Trace => TaskSpec::Trace(TraceSpec {
+            host: "127.0.0.1".into(),
+            max_hops: Some(4),
+        }),
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

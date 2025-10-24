@@ -11,11 +11,14 @@ use async_trait::async_trait;
 use tokio::sync::{Mutex, Notify, Semaphore};
 use tokio::time::Instant;
 
-use codecrafters_dns_server::control_plane::{Lease, TaskKind};
+use codecrafters_dns_server::control_plane::{
+    Lease, LeaseReport, Observation, PingSpec, TaskKind, TaskSpec, TcpSpec, TraceSpec,
+};
 use codecrafters_dns_server::dispatcher::{spawn_dispatcher, DispatcherConfig, LeaseAssignment};
 use codecrafters_dns_server::workers::{
     spawn_worker_pools, ReportSink, WorkerHandler, WorkerHandlers, WorkerPoolsConfig, WorkerReport,
 };
+use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 include!(concat!(env!("OUT_DIR"), "/worker_test_macro.rs"));
@@ -26,10 +29,36 @@ fn make_assignment(id: u64, kind: TaskKind) -> (LeaseAssignment, CancellationTok
         task_id: id,
         kind,
         lease_until_ms: 0,
+        spec: dummy_spec(kind, id),
     };
     let token = CancellationToken::new();
     let assignment = LeaseAssignment::new(lease, token.clone());
     (assignment, token)
+}
+
+fn dummy_spec(kind: TaskKind, id: u64) -> TaskSpec {
+    match kind {
+        TaskKind::Dns => TaskSpec::Dns {
+            query: format!("example-{id}.com"),
+            server: None,
+        },
+        TaskKind::Http => TaskSpec::Http {
+            url: format!("https://example.com/{id}"),
+            method: Some("GET".into()),
+        },
+        TaskKind::Tcp => TaskSpec::Tcp(TcpSpec {
+            host: "127.0.0.1".into(),
+            port: 53,
+        }),
+        TaskKind::Ping => TaskSpec::Ping(PingSpec {
+            host: "127.0.0.1".into(),
+            count: Some(4),
+        }),
+        TaskKind::Trace => TaskSpec::Trace(TraceSpec {
+            host: "127.0.0.1".into(),
+            max_hops: Some(8),
+        }),
+    }
 }
 
 worker_test!(worker_pool_respects_concurrency_limits, {
@@ -147,6 +176,9 @@ worker_test!(worker_reports_cancellation, {
 
     let cancelled = reporter.cancelled_async().await;
     assert_eq!(cancelled, vec![1]);
+    let reports = reporter.cancelled_reports_async().await;
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0].observations[0].name, "cancelled");
     let completed = reporter.completed_async().await;
     assert!(completed.is_empty());
 });
@@ -158,14 +190,14 @@ struct TestReporter {
 
 #[derive(Default)]
 struct TestReporterInner {
-    completed: Mutex<Vec<u64>>,
-    cancelled: Mutex<Vec<u64>>,
+    completed: Mutex<Vec<LeaseReport>>,
+    cancelled: Mutex<Vec<LeaseReport>>,
     notify: Notify,
 }
 
 #[async_trait]
 impl ReportSink for TestReporter {
-    async fn report(&self, completed: Vec<u64>, cancelled: Vec<u64>) -> Result<()> {
+    async fn report(&self, completed: Vec<LeaseReport>, cancelled: Vec<LeaseReport>) -> Result<()> {
         {
             let mut guard = self.inner.completed.lock().await;
             guard.extend(completed);
@@ -197,7 +229,13 @@ impl TestReporter {
     }
 
     async fn completed_async(&self) -> Vec<u64> {
-        self.inner.completed.lock().await.clone()
+        self.inner
+            .completed
+            .lock()
+            .await
+            .iter()
+            .map(|entry| entry.lease_id)
+            .collect()
     }
 
     async fn wait_for_cancelled(&self, expected: usize, timeout: Duration) {
@@ -217,6 +255,16 @@ impl TestReporter {
     }
 
     async fn cancelled_async(&self) -> Vec<u64> {
+        self.inner
+            .cancelled
+            .lock()
+            .await
+            .iter()
+            .map(|entry| entry.lease_id)
+            .collect()
+    }
+
+    async fn cancelled_reports_async(&self) -> Vec<LeaseReport> {
         self.inner.cancelled.lock().await.clone()
     }
 }
@@ -298,7 +346,14 @@ impl WorkerHandler for CancellableHandler {
         self.started.notify_waiters();
         token.cancelled().await;
         self.running.store(false, Ordering::SeqCst);
-        Ok(WorkerReport::cancelled(lease.lease_id))
+        Ok(WorkerReport::cancelled(lease.lease_id).with_observation(
+            lease.lease_id,
+            Observation {
+                name: "cancelled".into(),
+                value: json!(true),
+                unit: None,
+            },
+        ))
     }
 }
 

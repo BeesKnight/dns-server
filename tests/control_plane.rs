@@ -6,8 +6,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use codecrafters_dns_server::control_plane::{
     ClaimRequest, ClaimResponse, ControlPlaneClient, ControlPlaneError, ControlPlaneTransport,
-    ExtendOutcome, ExtendRequest, HeartbeatRequest, HeartbeatResponse, RegisterRequest,
-    RegisterResponse, ReportRequest, ReportResponse, TaskKind, TransportError,
+    ExtendOutcome, ExtendRequest, HeartbeatRequest, HeartbeatResponse, LeaseReport,
+    RegisterRequest, RegisterResponse, ReportRequest, ReportResponse, TaskKind, TaskSpec,
+    TransportError,
 };
 use support::{build_tasks, MockBackend, TaskType};
 use tokio::time::Instant as TokioInstant;
@@ -90,6 +91,7 @@ impl ControlPlaneTransport for MockBackendTransport {
                 task_id: lease.task.id,
                 kind: from_task_type(lease.task.kind),
                 lease_until_ms: deadline_to_millis(lease.lease_until),
+                spec: lease.task.spec.clone(),
             })
             .collect();
         Ok(ClaimResponse { leases })
@@ -170,6 +172,7 @@ async fn client_handles_lease_lifecycle() -> Result<(), ControlPlaneError> {
     capacities.insert(TaskKind::Dns, 2);
     let batch = client.claim(&capacities).await?;
     assert_eq!(batch.leases.len(), 2);
+    assert!(matches!(batch.leases[0].spec, TaskSpec::Dns { .. }));
 
     let snapshot = client.snapshot().await;
     assert_eq!(snapshot.leases.len(), 2);
@@ -180,7 +183,15 @@ async fn client_handles_lease_lifecycle() -> Result<(), ControlPlaneError> {
         .await?;
     assert_eq!(outcomes.len(), lease_ids.len());
 
-    let report = client.report(lease_ids.clone(), Vec::new()).await?;
+    let completed: Vec<LeaseReport> = lease_ids
+        .iter()
+        .copied()
+        .map(|lease_id| LeaseReport {
+            lease_id,
+            observations: Vec::new(),
+        })
+        .collect();
+    let report = client.report(completed, Vec::new()).await?;
     assert_eq!(report.acknowledged, lease_ids.len());
 
     let heartbeat = client.heartbeat().await?;

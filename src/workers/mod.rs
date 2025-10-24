@@ -17,7 +17,9 @@ use tokio::task::{JoinHandle, JoinSet};
 use tracing::{debug, error, info, warn};
 
 use crate::concurrency::{ConcurrencyController, ConcurrencyLimits};
-use crate::control_plane::{ControlPlaneClient, ControlPlaneTransport, TaskKind};
+use crate::control_plane::{
+    ControlPlaneClient, ControlPlaneTransport, LeaseReport, Observation, TaskKind,
+};
 use crate::dispatcher::{DispatchQueues, DispatchedLease, LeaseAssignment};
 use crate::lease_extender::LeaseExtenderClient;
 
@@ -117,7 +119,7 @@ impl Default for WorkerPoolsConfig {
 /// Trait used to report completed leases back to the control plane.
 #[async_trait]
 pub trait ReportSink: Clone + Send + Sync + 'static {
-    async fn report(&self, completed: Vec<u64>, cancelled: Vec<u64>) -> Result<()>;
+    async fn report(&self, completed: Vec<LeaseReport>, cancelled: Vec<LeaseReport>) -> Result<()>;
 }
 
 #[async_trait]
@@ -125,7 +127,7 @@ impl<T> ReportSink for ControlPlaneClient<T>
 where
     T: ControlPlaneTransport + Send + Sync + 'static,
 {
-    async fn report(&self, completed: Vec<u64>, cancelled: Vec<u64>) -> Result<()> {
+    async fn report(&self, completed: Vec<LeaseReport>, cancelled: Vec<LeaseReport>) -> Result<()> {
         let _ = <ControlPlaneClient<T>>::report(self, completed, cancelled)
             .await
             .map_err(|err| anyhow!(err))?;
@@ -142,21 +144,30 @@ pub trait WorkerHandler: Send + Sync {
 /// Outcome reported by worker handlers.
 #[derive(Debug)]
 pub struct WorkerReport {
-    completed: Vec<u64>,
-    cancelled: Vec<u64>,
+    completed: Vec<LeaseReport>,
+    cancelled: Vec<LeaseReport>,
 }
 
 impl WorkerReport {
     pub fn completed(lease_id: u64) -> Self {
         Self {
-            completed: vec![lease_id],
+            completed: vec![LeaseReport {
+                lease_id,
+                observations: Vec::new(),
+            }],
             cancelled: Vec::new(),
         }
     }
 
     pub fn completed_many(ids: Vec<u64>) -> Self {
         Self {
-            completed: ids,
+            completed: ids
+                .into_iter()
+                .map(|lease_id| LeaseReport {
+                    lease_id,
+                    observations: Vec::new(),
+                })
+                .collect(),
             cancelled: Vec::new(),
         }
     }
@@ -164,14 +175,23 @@ impl WorkerReport {
     pub fn cancelled(lease_id: u64) -> Self {
         Self {
             completed: Vec::new(),
-            cancelled: vec![lease_id],
+            cancelled: vec![LeaseReport {
+                lease_id,
+                observations: Vec::new(),
+            }],
         }
     }
 
     pub fn cancelled_many(ids: Vec<u64>) -> Self {
         Self {
             completed: Vec::new(),
-            cancelled: ids,
+            cancelled: ids
+                .into_iter()
+                .map(|lease_id| LeaseReport {
+                    lease_id,
+                    observations: Vec::new(),
+                })
+                .collect(),
         }
     }
 
@@ -181,7 +201,19 @@ impl WorkerReport {
         self
     }
 
-    pub fn into_parts(self) -> (Vec<u64>, Vec<u64>) {
+    pub fn with_observation(mut self, lease_id: u64, observation: Observation) -> Self {
+        if let Some(entry) = self
+            .completed
+            .iter_mut()
+            .chain(self.cancelled.iter_mut())
+            .find(|entry| entry.lease_id == lease_id)
+        {
+            entry.observations.push(observation);
+        }
+        self
+    }
+
+    pub fn into_parts(self) -> (Vec<LeaseReport>, Vec<LeaseReport>) {
         (self.completed, self.cancelled)
     }
 

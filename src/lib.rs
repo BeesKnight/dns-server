@@ -1,5 +1,6 @@
 pub mod control_plane;
 pub mod dispatcher;
+pub mod workers;
 
 use anyhow::{anyhow, Ok, Result};
 use std::net::Ipv4Addr;

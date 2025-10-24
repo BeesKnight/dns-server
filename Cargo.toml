@@ -17,6 +17,7 @@ tokio = { version = "1.38", features = ["macros", "net", "rt-multi-thread", "tim
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 hostname = "0.3"
+metrics = "0.23"
 
 [dev-dependencies]
 futures = "0.3"

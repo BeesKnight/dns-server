@@ -12,3 +12,14 @@ thiserror = "1.0.38"                             # error handling
 tokio = { version = "1.38", features = ["macros", "net", "rt-multi-thread", "time", "sync"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+
+[dev-dependencies]
+futures = "0.3"
+hdrhistogram = "7"
+metrics = "0.23"
+metrics-util = "0.15"
+num_cpus = "1.16"
+rand = "0.8"
+
+[build-dependencies]
+num_cpus = "1.16"

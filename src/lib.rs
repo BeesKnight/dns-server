@@ -2,62 +2,125 @@ pub mod concurrency;
 pub mod control_plane;
 pub mod dispatcher;
 pub mod lease_extender;
+pub mod resolver;
 pub mod workers;
 
 use anyhow::{anyhow, Ok, Result};
-use std::net::Ipv4Addr;
+use bytes::BytesMut;
+use crossbeam_queue::SegQueue;
+use once_cell::sync::Lazy;
+use std::{
+    mem,
+    net::{Ipv4Addr, Ipv6Addr},
+};
+
+pub const MAX_PACKET_SIZE: usize = 1232;
+
+static BYTE_PACKET_POOL: Lazy<PacketPool> = Lazy::new(PacketPool::default);
+
+struct PacketPool {
+    buffers: SegQueue<BytesMut>,
+}
+
+impl Default for PacketPool {
+    fn default() -> Self {
+        Self {
+            buffers: SegQueue::new(),
+        }
+    }
+}
+
+impl PacketPool {
+    fn get(&self) -> BytesMut {
+        self.buffers.pop().unwrap_or_else(|| {
+            let mut buf = BytesMut::with_capacity(MAX_PACKET_SIZE);
+            buf.resize(MAX_PACKET_SIZE, 0);
+            buf
+        })
+    }
+
+    fn put(&self, mut buffer: BytesMut) {
+        if buffer.len() != MAX_PACKET_SIZE {
+            buffer.resize(MAX_PACKET_SIZE, 0);
+        }
+        buffer[..].fill(0);
+        self.buffers.push(buffer);
+    }
+}
 
 pub struct BytePacketBuf {
-    pub buf: [u8; 512],
+    pub buf: BytesMut,
     pub pos: usize,
+    pub len: usize,
 }
 
 impl BytePacketBuf {
     pub fn new() -> BytePacketBuf {
+        let mut buf = BYTE_PACKET_POOL.get();
+        if buf.len() != MAX_PACKET_SIZE {
+            buf.resize(MAX_PACKET_SIZE, 0);
+        }
+        buf[..].fill(0);
         BytePacketBuf {
-            buf: [0; 512],
+            buf,
             pos: 0,
+            len: 0,
         }
     }
 
-    fn pos(&self) -> usize {
+    pub fn pos(&self) -> usize {
         self.pos
     }
 
-    fn get_range(&mut self, start: usize, len: usize) -> Result<&[u8]> {
-        if start + len >= 512 {
+    fn ensure_capacity(&self, end: usize) -> Result<()> {
+        if end > self.buf.len() {
             return Err(anyhow!("End of buffer"));
         }
+        Ok(())
+    }
+
+    fn ensure_readable(&self, end: usize) -> Result<()> {
+        if end > self.len {
+            return Err(anyhow!("End of buffer"));
+        }
+        Ok(())
+    }
+
+    fn get_range(&mut self, start: usize, len: usize) -> Result<&[u8]> {
+        self.ensure_readable(start + len)?;
         Ok(&self.buf[start..start + len])
     }
 
     fn set_to_pos(&mut self, pos: usize) -> Result<()> {
+        self.ensure_capacity(pos)?;
         self.pos = pos;
+        if self.pos > self.len {
+            self.len = self.pos;
+        }
         Ok(())
     }
 
     fn step(&mut self, step: usize) -> Result<()> {
-        self.pos += step;
+        let new_pos = self.pos + step;
+        self.ensure_readable(new_pos)?;
+        self.pos = new_pos;
         Ok(())
     }
 
-    fn seek(&mut self, pos: usize) -> Result<()> {
+    pub fn seek(&mut self, pos: usize) -> Result<()> {
+        self.ensure_capacity(pos)?;
         self.pos = pos;
 
         Ok(())
     }
 
     fn get(&mut self, pos: usize) -> Result<u8> {
-        if pos >= 512 {
-            return Err(anyhow!("End of buffer"));
-        }
+        self.ensure_readable(pos + 1)?;
         Ok(self.buf[pos])
     }
 
     fn read(&mut self) -> Result<u8> {
-        if self.pos >= 512 {
-            return Err(anyhow!("End of buffer"));
-        }
+        self.ensure_readable(self.pos + 1)?;
         let res = self.buf[self.pos];
         self.pos += 1;
 
@@ -88,6 +151,23 @@ impl BytePacketBuf {
             ((ip >> 16) & 0xFF) as u8,
             ((ip >> 8) & 0xFF) as u8,
             ((ip >> 0) & 0xFF) as u8,
+        ))
+    }
+
+    fn read_ipv6(&mut self) -> Result<Ipv6Addr> {
+        let mut segments = [0u16; 8];
+        for segment in &mut segments {
+            *segment = self.read_u16()?;
+        }
+        Ok(Ipv6Addr::new(
+            segments[0],
+            segments[1],
+            segments[2],
+            segments[3],
+            segments[4],
+            segments[5],
+            segments[6],
+            segments[7],
         ))
     }
 
@@ -152,11 +232,12 @@ impl BytePacketBuf {
     }
 
     pub fn write_u8(&mut self, val: u8) -> Result<()> {
-        if self.pos >= 512 {
-            return Err(anyhow!("End of buffer"));
-        }
+        self.ensure_capacity(self.pos + 1)?;
         self.buf[self.pos] = val;
         self.pos += 1;
+        if self.pos > self.len {
+            self.len = self.pos;
+        }
         Ok(())
     }
     // сделать write интерфейс, по дженерик типу. вставил
@@ -189,6 +270,26 @@ impl BytePacketBuf {
                     self.write_u8(*lebal).unwrap();
                 });
             });
+        self.write_u8(0)?;
+        Ok(())
+    }
+
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        self.buf.as_mut()
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        &self.buf[..self.len]
+    }
+
+    pub fn set_len(&mut self, len: usize) -> Result<()> {
+        if len > self.buf.len() {
+            return Err(anyhow!("length exceeds buffer"));
+        }
+        self.len = len;
+        if self.pos > self.len {
+            self.pos = self.len;
+        }
         Ok(())
     }
 }
@@ -196,6 +297,16 @@ impl BytePacketBuf {
 impl Default for BytePacketBuf {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Drop for BytePacketBuf {
+    fn drop(&mut self) {
+        let mut buffer = BytesMut::new();
+        mem::swap(&mut self.buf, &mut buffer);
+        BYTE_PACKET_POOL.put(buffer);
+        self.pos = 0;
+        self.len = 0;
     }
 }
 
@@ -249,7 +360,7 @@ impl Dns {
             result.authority.push(authority);
         }
 
-        for _ in 0..result.header.ancount {
+        for _ in 0..result.header.arcount {
             let additional = DnsRecord::read(buffer)?;
             result.additional.push(additional);
         }
@@ -498,16 +609,26 @@ pub struct ResourceRecord {
     len: u16,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum QueryType {
     UNKNOWN(u16),
     A,
+    AAAA,
+    NS,
+    MX,
+    TXT,
+    OPT,
 }
 
 impl From<u16> for QueryType {
     fn from(value: u16) -> Self {
         match value {
             1 => QueryType::A,
+            2 => QueryType::NS,
+            15 => QueryType::MX,
+            16 => QueryType::TXT,
+            28 => QueryType::AAAA,
+            41 => QueryType::OPT,
             _ => QueryType::UNKNOWN(value),
         }
     }
@@ -517,12 +638,17 @@ impl From<QueryType> for u16 {
     fn from(value: QueryType) -> Self {
         match value {
             QueryType::A => 1,
+            QueryType::NS => 2,
+            QueryType::MX => 15,
+            QueryType::TXT => 16,
+            QueryType::AAAA => 28,
+            QueryType::OPT => 41,
             QueryType::UNKNOWN(x) => x,
         }
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum DnsRecord {
     UNKNOWN {
         domain: String,
@@ -535,6 +661,34 @@ pub enum DnsRecord {
         addr: Ipv4Addr,
         ttl: u32,
     },
+    AAAA {
+        domain: String,
+        addr: Ipv6Addr,
+        ttl: u32,
+    },
+    NS {
+        domain: String,
+        host: String,
+        ttl: u32,
+    },
+    MX {
+        domain: String,
+        preference: u16,
+        exchange: String,
+        ttl: u32,
+    },
+    TXT {
+        domain: String,
+        data: Vec<String>,
+        ttl: u32,
+    },
+    OPT {
+        payload_size: u16,
+        extended_rcode: u8,
+        version: u8,
+        flags: u16,
+        options: Vec<u8>,
+    },
 }
 
 impl DnsRecord {
@@ -542,7 +696,7 @@ impl DnsRecord {
         let mut domain = String::new();
         buffer.read_qname(&mut domain)?;
         let rtype: QueryType = buffer.read_u16()?.into();
-        let _ = buffer.read_u16()?; // qclass
+        let class = buffer.read_u16()?;
         let ttl = buffer.read_u32()?;
         let data_len = buffer.read_u16()?;
 
@@ -550,6 +704,76 @@ impl DnsRecord {
             QueryType::A => {
                 let addr = buffer.read_ipv4()?;
                 Ok(DnsRecord::A { domain, addr, ttl })
+            }
+            QueryType::AAAA => {
+                let addr = buffer.read_ipv6()?;
+                Ok(DnsRecord::AAAA { domain, addr, ttl })
+            }
+            QueryType::NS => {
+                let mut host = String::new();
+                let start = buffer.pos();
+                buffer.read_qname(&mut host)?;
+                let consumed = buffer.pos() - start;
+                if consumed < data_len as usize {
+                    buffer.step(data_len as usize - consumed)?;
+                }
+                Ok(DnsRecord::NS { domain, host, ttl })
+            }
+            QueryType::MX => {
+                let pref = buffer.read_u16()?;
+                let mut exchange = String::new();
+                let start = buffer.pos();
+                buffer.read_qname(&mut exchange)?;
+                let consumed = 2 + (buffer.pos() - start);
+                if consumed < data_len as usize {
+                    buffer.step(data_len as usize - consumed)?;
+                }
+                Ok(DnsRecord::MX {
+                    domain,
+                    preference: pref,
+                    exchange,
+                    ttl,
+                })
+            }
+            QueryType::TXT => {
+                let mut remaining = data_len as usize;
+                let mut entries = Vec::new();
+                while remaining > 0 {
+                    let txt_len = buffer.read()? as usize;
+                    remaining = remaining
+                        .checked_sub(1)
+                        .ok_or_else(|| anyhow!("invalid TXT length"))?;
+                    if txt_len > remaining {
+                        return Err(anyhow!("invalid TXT record length"));
+                    }
+                    let mut data = Vec::with_capacity(txt_len);
+                    for _ in 0..txt_len {
+                        data.push(buffer.read()?);
+                    }
+                    remaining -= txt_len;
+                    entries.push(String::from_utf8_lossy(&data).into_owned());
+                }
+                Ok(DnsRecord::TXT {
+                    domain,
+                    data: entries,
+                    ttl,
+                })
+            }
+            QueryType::OPT => {
+                let extended_rcode = ((ttl >> 24) & 0xFF) as u8;
+                let version = ((ttl >> 16) & 0xFF) as u8;
+                let flags = (ttl & 0xFFFF) as u16;
+                let mut options = vec![0u8; data_len as usize];
+                for byte in options.iter_mut() {
+                    *byte = buffer.read()?;
+                }
+                Ok(DnsRecord::OPT {
+                    payload_size: class,
+                    extended_rcode,
+                    version,
+                    flags,
+                    options,
+                })
             }
             QueryType::UNKNOWN(_) => {
                 buffer.step(data_len.into())?;
@@ -567,7 +791,6 @@ impl DnsRecord {
         let start_pos = buffer.pos;
 
         match self {
-            DnsRecord::UNKNOWN { .. } => Ok(println!("skipping record")),
             DnsRecord::A { domain, addr, ttl } => {
                 buffer.write_qname(domain)?;
                 buffer.write_u16(QueryType::A.into())?;
@@ -576,14 +799,80 @@ impl DnsRecord {
                 buffer.write_u16(4)?;
 
                 let octets = addr.octets();
-                buffer.write_u8(octets[0])?;
-                buffer.write_u8(octets[1])?;
-                buffer.write_u8(octets[2])?;
-                buffer.write_u8(octets[3])?;
-                Ok(())
+                for byte in &octets {
+                    buffer.write_u8(*byte)?;
+                }
             }
+            DnsRecord::AAAA { domain, addr, ttl } => {
+                buffer.write_qname(domain)?;
+                buffer.write_u16(QueryType::AAAA.into())?;
+                buffer.write_u16(1)?;
+                buffer.write_u32(*ttl)?;
+                buffer.write_u16(16)?;
+                for segment in &addr.octets() {
+                    buffer.write_u8(*segment)?;
+                }
+            }
+            DnsRecord::NS { domain, host, ttl } => {
+                buffer.write_qname(domain)?;
+                buffer.write_u16(QueryType::NS.into())?;
+                buffer.write_u16(1)?;
+                buffer.write_u32(*ttl)?;
+                let rdlength_pos = buffer.pos();
+                buffer.write_u16(0)?;
+                let data_start = buffer.pos();
+                buffer.write_qname(host)?;
+                let rdata_len = buffer.pos() - data_start;
+                let current_pos = buffer.pos();
+                buffer.seek(rdlength_pos)?;
+                buffer.write_u16(rdata_len as u16)?;
+                buffer.seek(current_pos)?;
+            }
+            DnsRecord::MX {
+                domain,
+                preference,
+                exchange,
+                ttl,
+            } => {
+                buffer.write_qname(domain)?;
+                buffer.write_u16(QueryType::MX.into())?;
+                buffer.write_u16(1)?;
+                buffer.write_u32(*ttl)?;
+                let rdlength_pos = buffer.pos();
+                buffer.write_u16(0)?;
+                let data_start = buffer.pos();
+                buffer.write_u16(*preference)?;
+                buffer.write_qname(exchange)?;
+                let rdata_len = buffer.pos() - data_start;
+                let current_pos = buffer.pos();
+                buffer.seek(rdlength_pos)?;
+                buffer.write_u16(rdata_len as u16)?;
+                buffer.seek(current_pos)?;
+            }
+            DnsRecord::TXT { domain, data, ttl } => {
+                buffer.write_qname(domain)?;
+                buffer.write_u16(QueryType::TXT.into())?;
+                buffer.write_u16(1)?;
+                buffer.write_u32(*ttl)?;
+                let rdlength_pos = buffer.pos();
+                buffer.write_u16(0)?;
+                let data_start = buffer.pos();
+                for entry in data {
+                    let bytes = entry.as_bytes();
+                    buffer.write_u8(bytes.len() as u8)?;
+                    for byte in bytes {
+                        buffer.write_u8(*byte)?;
+                    }
+                }
+                let rdata_len = buffer.pos() - data_start;
+                let current_pos = buffer.pos();
+                buffer.seek(rdlength_pos)?;
+                buffer.write_u16(rdata_len as u16)?;
+                buffer.seek(current_pos)?;
+            }
+            DnsRecord::UNKNOWN { .. } | DnsRecord::OPT { .. } => {}
         }
-        .unwrap();
+
         Ok(buffer.pos() - start_pos)
     }
 }

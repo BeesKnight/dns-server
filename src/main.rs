@@ -93,9 +93,14 @@ async fn main() -> Result<()> {
     loop {
         let mut request_buffer = BytePacketBuf::new();
         let (len, peer) = listener
-            .recv_from(&mut request_buffer.buf)
+            .recv_from(&mut request_buffer.buf[..])
             .await
             .context("failed to receive request")?;
+
+        request_buffer
+            .set_len(len)
+            .context("failed to set request length")?;
+        request_buffer.seek(0)?;
 
         let permit = concurrency_limit
             .clone()
@@ -146,7 +151,7 @@ async fn handle_request(
     let mut response_buffer = BytePacketBuf::new();
     let upstream_result = timeout(
         config.upstream_timeout,
-        upstream_socket.recv(&mut response_buffer.buf),
+        upstream_socket.recv(&mut response_buffer.buf[..]),
     )
     .await;
 
@@ -158,6 +163,11 @@ async fn handle_request(
             return Ok(());
         }
     };
+
+    response_buffer
+        .set_len(response_len)
+        .context("failed to set response length")?;
+    response_buffer.seek(0)?;
 
     response_buffer.buf[0] = (request_id >> 8) as u8;
     response_buffer.buf[1] = (request_id & 0xFF) as u8;

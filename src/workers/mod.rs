@@ -17,8 +17,9 @@ use tokio::task::{JoinHandle, JoinSet};
 use tracing::{debug, error, info, warn};
 
 use crate::concurrency::{ConcurrencyController, ConcurrencyLimits};
-use crate::control_plane::{ControlPlaneClient, ControlPlaneTransport, Lease, TaskKind};
-use crate::dispatcher::{DispatchQueues, DispatchedLease};
+use crate::control_plane::{ControlPlaneClient, ControlPlaneTransport, TaskKind};
+use crate::dispatcher::{DispatchQueues, DispatchedLease, LeaseAssignment};
+use crate::lease_extender::LeaseExtenderClient;
 
 /// Trait that exposes the set of supported task kinds.
 trait TaskKindExt {
@@ -116,7 +117,7 @@ impl Default for WorkerPoolsConfig {
 /// Trait used to report completed leases back to the control plane.
 #[async_trait]
 pub trait ReportSink: Clone + Send + Sync + 'static {
-    async fn report(&self, completed: Vec<u64>) -> Result<()>;
+    async fn report(&self, completed: Vec<u64>, cancelled: Vec<u64>) -> Result<()>;
 }
 
 #[async_trait]
@@ -124,8 +125,8 @@ impl<T> ReportSink for ControlPlaneClient<T>
 where
     T: ControlPlaneTransport + Send + Sync + 'static,
 {
-    async fn report(&self, completed: Vec<u64>) -> Result<()> {
-        let _ = <ControlPlaneClient<T>>::report(self, completed)
+    async fn report(&self, completed: Vec<u64>, cancelled: Vec<u64>) -> Result<()> {
+        let _ = <ControlPlaneClient<T>>::report(self, completed, cancelled)
             .await
             .map_err(|err| anyhow!(err))?;
         Ok(())
@@ -135,28 +136,57 @@ where
 /// Trait implemented by worker handlers for each task type.
 #[async_trait]
 pub trait WorkerHandler: Send + Sync {
-    async fn handle(&self, lease: Lease) -> Result<WorkerReport>;
+    async fn handle(&self, assignment: LeaseAssignment) -> Result<WorkerReport>;
 }
 
 /// Outcome reported by worker handlers.
 #[derive(Debug)]
 pub struct WorkerReport {
     completed: Vec<u64>,
+    cancelled: Vec<u64>,
 }
 
 impl WorkerReport {
     pub fn completed(lease_id: u64) -> Self {
         Self {
             completed: vec![lease_id],
+            cancelled: Vec::new(),
         }
     }
 
     pub fn completed_many(ids: Vec<u64>) -> Self {
-        Self { completed: ids }
+        Self {
+            completed: ids,
+            cancelled: Vec::new(),
+        }
     }
 
-    pub fn into_completed(self) -> Vec<u64> {
-        self.completed
+    pub fn cancelled(lease_id: u64) -> Self {
+        Self {
+            completed: Vec::new(),
+            cancelled: vec![lease_id],
+        }
+    }
+
+    pub fn cancelled_many(ids: Vec<u64>) -> Self {
+        Self {
+            completed: Vec::new(),
+            cancelled: ids,
+        }
+    }
+
+    pub fn merge(mut self, mut other: WorkerReport) -> Self {
+        self.completed.append(&mut other.completed);
+        self.cancelled.append(&mut other.cancelled);
+        self
+    }
+
+    pub fn into_parts(self) -> (Vec<u64>, Vec<u64>) {
+        (self.completed, self.cancelled)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.completed.is_empty() && self.cancelled.is_empty()
     }
 }
 
@@ -231,6 +261,7 @@ pub fn spawn_worker_pools<R>(
     queues: DispatchQueues,
     handlers: WorkerHandlers,
     reporter: R,
+    lease_extender: Option<LeaseExtenderClient>,
 ) -> Result<WorkerPoolsHandle>
 where
     R: ReportSink,
@@ -260,6 +291,7 @@ where
 
     let controller = ConcurrencyController::new(config.concurrency_limits());
 
+    let lease_extender_dns = lease_extender.clone();
     joins.push(spawn_pool(
         "dns",
         TaskKind::Dns,
@@ -268,8 +300,10 @@ where
         reporter,
         controller.clone(),
         None,
+        lease_extender_dns,
     ));
 
+    let lease_extender_http = lease_extender.clone();
     joins.push(spawn_pool(
         "http",
         TaskKind::Http,
@@ -278,8 +312,10 @@ where
         reporter_http,
         controller.clone(),
         None,
+        lease_extender_http,
     ));
 
+    let lease_extender_tcp = lease_extender.clone();
     joins.push(spawn_pool(
         "tcp",
         TaskKind::Tcp,
@@ -288,8 +324,10 @@ where
         reporter_tcp,
         controller.clone(),
         None,
+        lease_extender_tcp,
     ));
 
+    let lease_extender_ping = lease_extender.clone();
     joins.push(spawn_pool(
         "ping",
         TaskKind::Ping,
@@ -298,9 +336,11 @@ where
         reporter_ping,
         controller.clone(),
         None,
+        lease_extender_ping,
     ));
 
     let (trace_runtime, trace_guard) = TraceRuntime::new(config.trace_runtime_workers())?;
+    let lease_extender_trace = lease_extender;
     joins.push(spawn_pool(
         "trace",
         TaskKind::Trace,
@@ -309,6 +349,7 @@ where
         reporter_trace,
         controller,
         Some(trace_runtime),
+        lease_extender_trace,
     ));
 
     Ok(WorkerPoolsHandle {
@@ -325,6 +366,7 @@ fn spawn_pool<R>(
     reporter: R,
     controller: ConcurrencyController,
     trace_runtime: Option<TraceRuntime>,
+    lease_extender: Option<LeaseExtenderClient>,
 ) -> JoinHandle<()>
 where
     R: ReportSink,
@@ -333,27 +375,41 @@ where
         let mut joinset = JoinSet::new();
         let inflight_gauge = Arc::new(AtomicUsize::new(0));
         while let Some(item) = queue.recv().await {
-            let lease = item.into_lease();
-            let target = lease.task_id;
+            let assignment = item.into_assignment();
+            let lease_id = assignment.lease().lease_id;
+            let target = assignment.lease().task_id;
             let controller_for_task = controller.clone();
             let permit = controller_for_task.acquire(kind, target).await;
             let tracker = Arc::clone(&inflight_gauge);
             let handler = Arc::clone(&handler);
             let reporter = reporter.clone();
             let runtime = trace_runtime.clone();
+            let lease_extender_for_task = lease_extender.clone();
             let start = Instant::now();
             tracker.fetch_add(1, Ordering::SeqCst);
             metrics::gauge!("workers.inflight", "kind" => label)
                 .set(tracker.load(Ordering::SeqCst) as f64);
 
             let task = async move {
-                let result = AssertUnwindSafe(handler.handle(lease)).catch_unwind().await;
+                let result = AssertUnwindSafe(handler.handle(assignment))
+                    .catch_unwind()
+                    .await;
                 match result {
                     Ok(Ok(report)) => {
                         controller_for_task.record_success(kind, target);
-                        metrics::counter!("workers.completed", "kind" => label).increment(1);
-                        if let Err(err) = reporter.report(report.into_completed()).await {
-                            warn!(error = %err, kind = label, "failed to report completed lease");
+                        let (completed, cancelled) = report.into_parts();
+                        if !completed.is_empty() {
+                            metrics::counter!("workers.completed", "kind" => label)
+                                .increment(completed.len() as u64);
+                        }
+                        if !cancelled.is_empty() {
+                            metrics::counter!("workers.cancelled", "kind" => label)
+                                .increment(cancelled.len() as u64);
+                        }
+                        if !completed.is_empty() || !cancelled.is_empty() {
+                            if let Err(err) = reporter.report(completed, cancelled).await {
+                                warn!(error = %err, kind = label, "failed to report lease outcome");
+                            }
                         }
                     }
                     Ok(Err(err)) => {
@@ -373,6 +429,11 @@ where
                 tracker.fetch_sub(1, Ordering::SeqCst);
                 metrics::gauge!("workers.inflight", "kind" => label)
                     .set(tracker.load(Ordering::SeqCst) as f64);
+                if let Some(extender) = lease_extender_for_task {
+                    if let Err(err) = extender.finish(lease_id).await {
+                        warn!(error = %err, kind = label, "failed to finalize lease tracking");
+                    }
+                }
             };
 
             joinset.spawn(async move {
@@ -402,8 +463,17 @@ pub struct DnsWorker;
 
 #[async_trait]
 impl WorkerHandler for DnsWorker {
-    async fn handle(&self, lease: Lease) -> Result<WorkerReport> {
+    async fn handle(&self, assignment: LeaseAssignment) -> Result<WorkerReport> {
+        let (lease, token) = assignment.into_parts();
+        if token.is_cancelled() {
+            debug!(lease_id = lease.lease_id, kind = ?lease.kind, "DNS lease cancelled before start");
+            return Ok(WorkerReport::cancelled(lease.lease_id));
+        }
         debug!(lease_id = lease.lease_id, kind = ?lease.kind, "processing DNS lease");
+        if token.is_cancelled() {
+            debug!(lease_id = lease.lease_id, kind = ?lease.kind, "DNS lease cancelled during processing");
+            return Ok(WorkerReport::cancelled(lease.lease_id));
+        }
         Ok(WorkerReport::completed(lease.lease_id))
     }
 }
@@ -414,8 +484,17 @@ pub struct HttpWorker;
 
 #[async_trait]
 impl WorkerHandler for HttpWorker {
-    async fn handle(&self, lease: Lease) -> Result<WorkerReport> {
+    async fn handle(&self, assignment: LeaseAssignment) -> Result<WorkerReport> {
+        let (lease, token) = assignment.into_parts();
+        if token.is_cancelled() {
+            debug!(lease_id = lease.lease_id, kind = ?lease.kind, "HTTP lease cancelled before start");
+            return Ok(WorkerReport::cancelled(lease.lease_id));
+        }
         debug!(lease_id = lease.lease_id, kind = ?lease.kind, "processing HTTP lease");
+        if token.is_cancelled() {
+            debug!(lease_id = lease.lease_id, kind = ?lease.kind, "HTTP lease cancelled during processing");
+            return Ok(WorkerReport::cancelled(lease.lease_id));
+        }
         Ok(WorkerReport::completed(lease.lease_id))
     }
 }
@@ -426,8 +505,17 @@ pub struct TcpWorker;
 
 #[async_trait]
 impl WorkerHandler for TcpWorker {
-    async fn handle(&self, lease: Lease) -> Result<WorkerReport> {
+    async fn handle(&self, assignment: LeaseAssignment) -> Result<WorkerReport> {
+        let (lease, token) = assignment.into_parts();
+        if token.is_cancelled() {
+            debug!(lease_id = lease.lease_id, kind = ?lease.kind, "TCP lease cancelled before start");
+            return Ok(WorkerReport::cancelled(lease.lease_id));
+        }
         debug!(lease_id = lease.lease_id, kind = ?lease.kind, "processing TCP lease");
+        if token.is_cancelled() {
+            debug!(lease_id = lease.lease_id, kind = ?lease.kind, "TCP lease cancelled during processing");
+            return Ok(WorkerReport::cancelled(lease.lease_id));
+        }
         Ok(WorkerReport::completed(lease.lease_id))
     }
 }
@@ -438,8 +526,17 @@ pub struct PingWorker;
 
 #[async_trait]
 impl WorkerHandler for PingWorker {
-    async fn handle(&self, lease: Lease) -> Result<WorkerReport> {
+    async fn handle(&self, assignment: LeaseAssignment) -> Result<WorkerReport> {
+        let (lease, token) = assignment.into_parts();
+        if token.is_cancelled() {
+            debug!(lease_id = lease.lease_id, kind = ?lease.kind, "Ping lease cancelled before start");
+            return Ok(WorkerReport::cancelled(lease.lease_id));
+        }
         debug!(lease_id = lease.lease_id, kind = ?lease.kind, "processing Ping lease");
+        if token.is_cancelled() {
+            debug!(lease_id = lease.lease_id, kind = ?lease.kind, "Ping lease cancelled during processing");
+            return Ok(WorkerReport::cancelled(lease.lease_id));
+        }
         Ok(WorkerReport::completed(lease.lease_id))
     }
 }
@@ -450,8 +547,17 @@ pub struct TraceWorker;
 
 #[async_trait]
 impl WorkerHandler for TraceWorker {
-    async fn handle(&self, lease: Lease) -> Result<WorkerReport> {
+    async fn handle(&self, assignment: LeaseAssignment) -> Result<WorkerReport> {
+        let (lease, token) = assignment.into_parts();
+        if token.is_cancelled() {
+            info!(lease_id = lease.lease_id, kind = ?lease.kind, "Trace lease cancelled before start");
+            return Ok(WorkerReport::cancelled(lease.lease_id));
+        }
         info!(lease_id = lease.lease_id, kind = ?lease.kind, "processing Trace lease");
+        if token.is_cancelled() {
+            info!(lease_id = lease.lease_id, kind = ?lease.kind, "Trace lease cancelled during processing");
+            return Ok(WorkerReport::cancelled(lease.lease_id));
+        }
         Ok(WorkerReport::completed(lease.lease_id))
     }
 }

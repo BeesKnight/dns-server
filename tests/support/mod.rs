@@ -4,20 +4,27 @@ use std::{
     time::Duration,
 };
 
+use anyhow::anyhow;
+use async_trait::async_trait;
 use futures::future::{self, Either};
 use hdrhistogram::Histogram;
 use thiserror::Error;
 use tokio::{
     select,
-    sync::{mpsc, oneshot, watch, Notify},
+    sync::{mpsc, oneshot, watch, Mutex as AsyncMutex, Notify},
     task::JoinHandle,
-    time::{self, Instant, MissedTickBehavior},
+    time::{self, Instant},
 };
+use tokio_util::sync::CancellationToken;
 
 use codecrafters_dns_server::concurrency::{
     ConcurrencyController, ConcurrencyLimits, ConcurrencyPermit,
 };
-use codecrafters_dns_server::control_plane::TaskKind;
+use codecrafters_dns_server::control_plane::{ExtendOutcome as AgentExtendOutcome, TaskKind};
+use codecrafters_dns_server::lease_extender::{
+    spawn_lease_extender, LeaseExtendClient, LeaseExtendUpdate, LeaseExtenderClient,
+    LeaseExtenderConfig, LeaseExtenderHandle,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub enum TaskType {
@@ -160,6 +167,7 @@ pub struct ExtendOutcome {
 pub struct ReportRequest {
     pub agent_id: AgentId,
     pub completed: Vec<u64>,
+    pub cancelled: Vec<u64>,
 }
 
 #[derive(Debug)]
@@ -330,6 +338,74 @@ impl MockBackendControl {
 
     pub async fn shutdown(&self) {
         let _ = self.control_tx.send(ControlCommand::Shutdown).await;
+    }
+}
+
+#[derive(Clone)]
+struct BackendExtender {
+    backend: MockBackend,
+    stats: Arc<PipelineStats>,
+    agent: Arc<AsyncMutex<Option<AgentId>>>,
+}
+
+impl BackendExtender {
+    fn new(backend: MockBackend, stats: Arc<PipelineStats>) -> Self {
+        Self {
+            backend,
+            stats,
+            agent: Arc::new(AsyncMutex::new(None)),
+        }
+    }
+
+    async fn set_agent(&self, agent_id: AgentId) {
+        let mut guard = self.agent.lock().await;
+        *guard = Some(agent_id);
+    }
+}
+
+#[async_trait]
+impl LeaseExtendClient for BackendExtender {
+    async fn extend_leases(
+        &self,
+        lease_ids: Vec<u64>,
+        extend_by: Duration,
+    ) -> anyhow::Result<LeaseExtendUpdate> {
+        let agent_id = {
+            let guard = self.agent.lock().await;
+            guard.unwrap_or(AgentId(0))
+        };
+        let request = ExtendRequest {
+            agent_id,
+            lease_ids: lease_ids.clone(),
+            extend_by,
+        };
+        match self.backend.extend(request).await {
+            Ok(outcomes) => {
+                let now = Instant::now();
+                let mut converted = Vec::new();
+                for outcome in outcomes {
+                    self.stats.record_extension();
+                    let remaining = outcome
+                        .new_deadline
+                        .checked_duration_since(now)
+                        .unwrap_or_default()
+                        .as_millis() as u64;
+                    converted.push(AgentExtendOutcome {
+                        lease_id: outcome.lease_id,
+                        new_deadline_ms: remaining,
+                    });
+                }
+                Ok(LeaseExtendUpdate {
+                    outcomes: converted,
+                    revoked: Vec::new(),
+                })
+            }
+            Err(BackendError::TaskRevoked { task_id }) => Ok(LeaseExtendUpdate {
+                outcomes: Vec::new(),
+                revoked: vec![task_id],
+            }),
+            Err(err) => Err(anyhow!(err)),
+        }
     }
 }
 
@@ -535,6 +611,13 @@ impl MockBackendDriver {
                                     }
                                 }
                             }
+                            if error.is_none() {
+                                for lease_id in request.cancelled {
+                                    if let Some(state) = leases.remove(&lease_id) {
+                                        let _ = state;
+                                    }
+                                }
+                            }
                             if let Some(err) = error {
                                 let _ = respond_to.send(Err(err));
                             } else {
@@ -583,66 +666,71 @@ impl AgentPipelineConfig {
 struct WorkerCommand {
     lease: LeasedTask,
     permit: ConcurrencyPermit,
+    token: CancellationToken,
+    extender: LeaseExtenderClient,
+}
+
+fn to_control_plane_lease(lease: &LeasedTask) -> codecrafters_dns_server::control_plane::Lease {
+    let remaining = lease
+        .lease_until
+        .checked_duration_since(Instant::now())
+        .unwrap_or_default()
+        .as_millis() as u64;
+    codecrafters_dns_server::control_plane::Lease {
+        lease_id: lease.lease_id,
+        task_id: lease.task.id,
+        kind: lease.task.kind.into(),
+        lease_until_ms: remaining,
+    }
 }
 
 async fn process_task(
     agent_id: AgentId,
     kind: TaskType,
     latency: Duration,
-    extend_every: Duration,
-    extend_by: Duration,
     backend: MockBackend,
     stats: Arc<PipelineStats>,
     notify: Arc<Notify>,
     cmd: WorkerCommand,
 ) {
-    let WorkerCommand { lease, permit } = cmd;
+    let WorkerCommand {
+        lease,
+        permit,
+        token,
+        extender,
+    } = cmd;
     stats.record_start(kind);
     let start = Instant::now();
-    let (cancel_tx, mut cancel_rx) = oneshot::channel();
     let lease_id = lease.lease_id;
     let task_id = lease.task.id;
-    let extend_task = if latency > extend_every {
-        let backend_extend = backend.clone();
-        let stats_extend = stats.clone();
-        Some(tokio::spawn(async move {
-            let mut ticker = time::interval(extend_every);
-            ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
-            loop {
-                select! {
-                    _ = &mut cancel_rx => break,
-                    _ = ticker.tick() => {
-                        if backend_extend
-                            .extend(ExtendRequest {
-                                agent_id,
-                                lease_ids: vec![lease_id],
-                                extend_by,
-                            })
-                            .await
-                            .is_ok()
-                        {
-                            stats_extend.record_extension();
-                        }
-                    }
-                }
-            }
-        }))
-    } else {
-        None
+    let sleep = time::sleep(latency);
+    tokio::pin!(sleep);
+    let cancelled = tokio::select! {
+        _ = &mut sleep => token.is_cancelled(),
+        _ = token.cancelled() => true,
     };
 
-    time::sleep(latency).await;
-    let _ = backend
-        .report(ReportRequest {
-            agent_id,
-            completed: vec![lease_id],
-        })
-        .await;
-    let _ = cancel_tx.send(());
-    if let Some(handle) = extend_task {
-        let _ = handle.await;
+    if cancelled {
+        stats.record_cancellation(kind, task_id);
+        let _ = backend
+            .report(ReportRequest {
+                agent_id,
+                completed: Vec::new(),
+                cancelled: vec![lease_id],
+            })
+            .await;
+    } else {
+        stats.record_completion(kind, start.elapsed(), task_id);
+        let _ = backend
+            .report(ReportRequest {
+                agent_id,
+                completed: vec![lease_id],
+                cancelled: Vec::new(),
+            })
+            .await;
     }
-    stats.record_completion(kind, start.elapsed(), task_id);
+
+    let _ = extender.finish(lease_id).await;
     drop(permit);
     notify.notify_waiters();
 }
@@ -650,9 +738,11 @@ async fn process_task(
 pub struct PipelineStats {
     total_completed: std::sync::atomic::AtomicU64,
     total_extensions: std::sync::atomic::AtomicU64,
+    total_cancelled: std::sync::atomic::AtomicU64,
     per_type_completed: HashMap<TaskType, std::sync::atomic::AtomicU64>,
     per_type_current: HashMap<TaskType, std::sync::atomic::AtomicUsize>,
     per_type_peak: HashMap<TaskType, std::sync::atomic::AtomicUsize>,
+    per_type_cancelled: HashMap<TaskType, std::sync::atomic::AtomicU64>,
     max_leases: std::sync::atomic::AtomicU64,
     current_leases: std::sync::atomic::AtomicU64,
     histogram: Mutex<Histogram<u64>>,
@@ -665,17 +755,21 @@ impl PipelineStats {
         let mut per_type_completed = HashMap::new();
         let mut per_type_current = HashMap::new();
         let mut per_type_peak = HashMap::new();
+        let mut per_type_cancelled = HashMap::new();
         for kind in TaskType::ALL {
             per_type_completed.insert(kind, std::sync::atomic::AtomicU64::new(0));
             per_type_current.insert(kind, std::sync::atomic::AtomicUsize::new(0));
             per_type_peak.insert(kind, std::sync::atomic::AtomicUsize::new(0));
+            per_type_cancelled.insert(kind, std::sync::atomic::AtomicU64::new(0));
         }
         Arc::new(PipelineStats {
             total_completed: std::sync::atomic::AtomicU64::new(0),
             total_extensions: std::sync::atomic::AtomicU64::new(0),
+            total_cancelled: std::sync::atomic::AtomicU64::new(0),
             per_type_completed,
             per_type_current,
             per_type_peak,
+            per_type_cancelled,
             max_leases: std::sync::atomic::AtomicU64::new(0),
             current_leases: std::sync::atomic::AtomicU64::new(0),
             histogram: Mutex::new(histogram),
@@ -748,6 +842,26 @@ impl PipelineStats {
         }
     }
 
+    pub fn record_cancellation(&self, kind: TaskType, task_id: u64) {
+        let is_new = self
+            .completed_ids
+            .lock()
+            .map(|mut set| set.insert(task_id))
+            .unwrap_or(true);
+        if is_new {
+            self.total_cancelled
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if let Some(counter) = self.per_type_cancelled.get(&kind) {
+                counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        if let Some(current) = self.per_type_current.get(&kind) {
+            current.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.current_leases
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub fn record_extension(&self) {
         self.total_extensions
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -758,6 +872,11 @@ impl PipelineStats {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    pub fn total_cancelled(&self) -> u64 {
+        self.total_cancelled
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub fn total_extensions(&self) -> u64 {
         self.total_extensions
             .load(std::sync::atomic::Ordering::Relaxed)
@@ -765,6 +884,13 @@ impl PipelineStats {
 
     pub fn per_type_completed(&self, kind: TaskType) -> u64 {
         self.per_type_completed
+            .get(&kind)
+            .map(|value| value.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or_default()
+    }
+
+    pub fn per_type_cancelled(&self, kind: TaskType) -> u64 {
+        self.per_type_cancelled
             .get(&kind)
             .map(|value| value.load(std::sync::atomic::Ordering::Relaxed))
             .unwrap_or_default()
@@ -795,6 +921,7 @@ pub struct PipelineHandle {
     heartbeat: JoinHandle<()>,
     worker_handles: Vec<JoinHandle<()>>,
     stats: Arc<PipelineStats>,
+    lease_extender: LeaseExtenderHandle,
 }
 
 impl PipelineHandle {
@@ -816,6 +943,7 @@ impl PipelineHandle {
             let _ = handle.await;
         }
         let _ = self.heartbeat.await;
+        self.lease_extender.shutdown().await;
         self.stats
     }
 }
@@ -828,6 +956,14 @@ impl AgentPipeline {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let (agent_tx, agent_rx) = watch::channel::<Option<AgentId>>(None);
         let notify = Arc::new(Notify::new());
+
+        let extender_backend = BackendExtender::new(backend.clone(), stats.clone());
+        let extender_config = LeaseExtenderConfig {
+            extend_every: config.extend_every,
+            extend_by: config.extend_by,
+        };
+        let (lease_extender_handle, lease_extender_client) =
+            spawn_lease_extender(extender_backend.clone(), extender_config);
 
         let mut worker_handles = Vec::new();
         let mut worker_senders = HashMap::new();
@@ -850,8 +986,6 @@ impl AgentPipeline {
             let stats_clone = stats.clone();
             let mut agent_rx = agent_rx.clone();
             let notify_clone = notify.clone();
-            let extend_every = config.extend_every;
-            let extend_by = config.extend_by;
             let latency = config
                 .processing_latency
                 .get(&kind)
@@ -874,8 +1008,6 @@ impl AgentPipeline {
                         agent_id,
                         kind,
                         latency,
-                        extend_every,
-                        extend_by,
                         backend_task,
                         stats_task,
                         notify_task,
@@ -919,10 +1051,13 @@ impl AgentPipeline {
             let worker_senders = worker_senders.clone();
             let controller = controller.clone();
             let notify = notify.clone();
+            let extender_backend_loop = extender_backend.clone();
+            let lease_extender_client_loop = lease_extender_client.clone();
             tokio::spawn(async move {
                 let registration = backend.register().await.expect("register succeeded");
                 let agent_id = registration.agent_id;
                 let _ = agent_tx.send(Some(agent_id));
+                extender_backend_loop.set_agent(agent_id).await;
                 loop {
                     if *shutdown_rx.borrow() {
                         break;
@@ -982,7 +1117,17 @@ impl AgentPipeline {
                                     let controller_clone = controller.clone();
                                     let permit =
                                         controller_clone.acquire(task_kind, lease.task.id).await;
-                                    let _ = sender.send(WorkerCommand { lease, permit }).await;
+                                    let token = CancellationToken::new();
+                                    let lease_view = to_control_plane_lease(&lease);
+                                    let _ =
+                                        lease_extender_client_loop.track(&lease_view, &token).await;
+                                    let command = WorkerCommand {
+                                        lease,
+                                        permit,
+                                        token,
+                                        extender: lease_extender_client_loop.clone(),
+                                    };
+                                    let _ = sender.send(command).await;
                                 }
                             }
                         }
@@ -1001,6 +1146,7 @@ impl AgentPipeline {
             heartbeat,
             worker_handles,
             stats,
+            lease_extender: lease_extender_handle,
         }
     }
 }

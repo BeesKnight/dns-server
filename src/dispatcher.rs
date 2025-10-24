@@ -6,8 +6,38 @@ use std::time::Instant;
 
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use crate::control_plane::{Lease, TaskKind};
+
+/// Representation of a lease scheduled for execution alongside its
+/// cancellation token.
+#[derive(Clone, Debug)]
+pub struct LeaseAssignment {
+    lease: Lease,
+    cancellation: CancellationToken,
+}
+
+impl LeaseAssignment {
+    pub fn new(lease: Lease, cancellation: CancellationToken) -> Self {
+        Self {
+            lease,
+            cancellation,
+        }
+    }
+
+    pub fn lease(&self) -> &Lease {
+        &self.lease
+    }
+
+    pub fn cancellation_token(&self) -> CancellationToken {
+        self.cancellation.clone()
+    }
+
+    pub fn into_parts(self) -> (Lease, CancellationToken) {
+        (self.lease, self.cancellation)
+    }
+}
 
 /// Configuration for the dispatcher runtime.
 #[derive(Clone, Debug)]
@@ -46,8 +76,8 @@ pub struct DispatchIngress {
 }
 
 impl DispatchIngress {
-    pub async fn dispatch(&self, lease: Lease) -> Result<(), DispatchError> {
-        let job = DispatchJob::new(lease);
+    pub async fn dispatch(&self, assignment: LeaseAssignment) -> Result<(), DispatchError> {
+        let job = DispatchJob::new(assignment);
         self.inner
             .dispatch_tx
             .send(job)
@@ -55,12 +85,12 @@ impl DispatchIngress {
             .map_err(|_| DispatchError::Closed)
     }
 
-    pub async fn dispatch_batch<I>(&self, leases: I) -> Result<(), DispatchError>
+    pub async fn dispatch_batch<I>(&self, assignments: I) -> Result<(), DispatchError>
     where
-        I: IntoIterator<Item = Lease>,
+        I: IntoIterator<Item = LeaseAssignment>,
     {
-        for lease in leases.into_iter() {
-            self.dispatch(lease).await?;
+        for assignment in assignments.into_iter() {
+            self.dispatch(assignment).await?;
         }
         Ok(())
     }
@@ -97,14 +127,14 @@ pub enum DispatchError {
 }
 
 struct DispatchJob {
-    lease: Lease,
+    assignment: LeaseAssignment,
     enqueued_at: Instant,
 }
 
 impl DispatchJob {
-    fn new(lease: Lease) -> Self {
+    fn new(assignment: LeaseAssignment) -> Self {
         Self {
-            lease,
+            assignment,
             enqueued_at: Instant::now(),
         }
     }
@@ -180,16 +210,16 @@ fn kind_label(kind: TaskKind) -> &'static str {
 
 /// Item routed into a per-kind queue.
 pub struct DispatchedLease {
-    lease: Option<Lease>,
+    assignment: Option<LeaseAssignment>,
     enqueued_at: Instant,
     tracker: Arc<QueueTracker>,
     counted: bool,
 }
 
 impl DispatchedLease {
-    fn new(lease: Lease, enqueued_at: Instant, tracker: Arc<QueueTracker>) -> Self {
+    fn new(assignment: LeaseAssignment, enqueued_at: Instant, tracker: Arc<QueueTracker>) -> Self {
         Self {
-            lease: Some(lease),
+            assignment: Some(assignment),
             enqueued_at,
             tracker,
             counted: false,
@@ -211,19 +241,19 @@ impl DispatchedLease {
         }
     }
 
-    pub fn lease(&self) -> &Lease {
-        self.lease.as_ref().expect("lease already taken")
+    pub fn assignment(&self) -> &LeaseAssignment {
+        self.assignment.as_ref().expect("assignment already taken")
     }
 
-    pub fn into_lease(mut self) -> Lease {
-        let lease = self.lease.take().expect("lease already taken");
+    pub fn into_assignment(mut self) -> LeaseAssignment {
+        let assignment = self.assignment.take().expect("assignment already taken");
         let elapsed = self.enqueued_at.elapsed().as_secs_f64();
         metrics::histogram!(
             "dispatcher.queue.wait_time",
             "kind" => kind_label(self.tracker.kind())
         )
         .record(elapsed);
-        lease
+        assignment
     }
 }
 
@@ -233,6 +263,7 @@ impl Drop for DispatchedLease {
             self.tracker.decrement();
             self.counted = false;
         }
+        self.assignment.take();
     }
 }
 
@@ -307,10 +338,10 @@ async fn run_dispatcher(
 ) {
     let mut backpressure_active = false;
     while let Some(job) = dispatch_rx.recv().await {
-        let entry = table.entry(job.lease.kind);
+        let entry = table.entry(job.assignment.lease().kind);
         let sender = entry.sender.clone();
         let tracker = Arc::clone(&entry.tracker);
-        let item = DispatchedLease::new(job.lease, job.enqueued_at, tracker);
+        let item = DispatchedLease::new(job.assignment, job.enqueued_at, tracker);
         enqueue_item(sender, item, &backpressure, &mut backpressure_active).await;
     }
 

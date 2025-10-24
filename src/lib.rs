@@ -1,6 +1,7 @@
 pub mod concurrency;
 pub mod control_plane;
 pub mod dispatcher;
+pub mod lease_extender;
 pub mod workers;
 
 use anyhow::{anyhow, Ok, Result};

@@ -12,12 +12,25 @@ use tokio::sync::{Mutex, Notify, Semaphore};
 use tokio::time::Instant;
 
 use codecrafters_dns_server::control_plane::{Lease, TaskKind};
-use codecrafters_dns_server::dispatcher::{spawn_dispatcher, DispatcherConfig};
+use codecrafters_dns_server::dispatcher::{spawn_dispatcher, DispatcherConfig, LeaseAssignment};
 use codecrafters_dns_server::workers::{
-    spawn_worker_pools, ReportSink, WorkerHandler, WorkerHandlers, WorkerPoolsConfig,
+    spawn_worker_pools, ReportSink, WorkerHandler, WorkerHandlers, WorkerPoolsConfig, WorkerReport,
 };
+use tokio_util::sync::CancellationToken;
 
 include!(concat!(env!("OUT_DIR"), "/worker_test_macro.rs"));
+
+fn make_assignment(id: u64, kind: TaskKind) -> (LeaseAssignment, CancellationToken) {
+    let lease = Lease {
+        lease_id: id,
+        task_id: id,
+        kind,
+        lease_until_ms: 0,
+    };
+    let token = CancellationToken::new();
+    let assignment = LeaseAssignment::new(lease, token.clone());
+    (assignment, token)
+}
 
 worker_test!(worker_pool_respects_concurrency_limits, {
     let dispatcher_config = DispatcherConfig {
@@ -39,19 +52,12 @@ worker_test!(worker_pool_respects_concurrency_limits, {
     let mut handlers = WorkerHandlers::default();
     handlers.dns = handler.clone();
 
-    let pools = spawn_worker_pools(pool_config, queues, handlers, reporter.clone())
+    let pools = spawn_worker_pools(pool_config, queues, handlers, reporter.clone(), None)
         .expect("worker pools spawn");
 
     for id in 1..=6 {
-        ingress
-            .dispatch(Lease {
-                lease_id: id,
-                task_id: id,
-                kind: TaskKind::Dns,
-                lease_until_ms: 0,
-            })
-            .await
-            .expect("dispatch lease");
+        let (assignment, _) = make_assignment(id, TaskKind::Dns);
+        ingress.dispatch(assignment).await.expect("dispatch lease");
     }
 
     handler.wait_for_inflight(2, Duration::from_secs(1)).await;
@@ -78,19 +84,12 @@ worker_test!(worker_pool_recovers_from_panics, {
     let mut handlers = WorkerHandlers::default();
     handlers.dns = handler.clone();
 
-    let pools = spawn_worker_pools(pool_config, queues, handlers, reporter.clone())
+    let pools = spawn_worker_pools(pool_config, queues, handlers, reporter.clone(), None)
         .expect("spawn worker pools");
 
     for id in 1..=3 {
-        ingress
-            .dispatch(Lease {
-                lease_id: id,
-                task_id: id,
-                kind: TaskKind::Dns,
-                lease_until_ms: 0,
-            })
-            .await
-            .expect("dispatch lease");
+        let (assignment, _) = make_assignment(id, TaskKind::Dns);
+        ingress.dispatch(assignment).await.expect("dispatch lease");
     }
 
     reporter.wait_for_total(2, Duration::from_secs(2)).await;
@@ -118,6 +117,40 @@ worker_test!(worker_pool_recovers_from_panics, {
     }
 });
 
+worker_test!(worker_reports_cancellation, {
+    let dispatcher_config = DispatcherConfig::default();
+    let (ingress, queues, dispatcher_handle) = spawn_dispatcher(dispatcher_config);
+
+    let reporter = TestReporter::default();
+
+    let mut pool_config = WorkerPoolsConfig::new();
+    pool_config.set_concurrency(TaskKind::Dns, 1);
+
+    let handler = Arc::new(CancellableHandler::new());
+    let mut handlers = WorkerHandlers::default();
+    handlers.dns = handler.clone();
+
+    let pools = spawn_worker_pools(pool_config, queues, handlers, reporter.clone(), None)
+        .expect("spawn worker pools");
+
+    let (assignment, token) = make_assignment(1, TaskKind::Dns);
+    ingress.dispatch(assignment).await.expect("dispatch lease");
+
+    handler.wait_started(Duration::from_secs(1)).await;
+    token.cancel();
+
+    reporter.wait_for_cancelled(1, Duration::from_secs(2)).await;
+
+    drop(ingress);
+    pools.shutdown().await;
+    dispatcher_handle.shutdown().await;
+
+    let cancelled = reporter.cancelled_async().await;
+    assert_eq!(cancelled, vec![1]);
+    let completed = reporter.completed_async().await;
+    assert!(completed.is_empty());
+});
+
 #[derive(Clone, Default)]
 struct TestReporter {
     inner: Arc<TestReporterInner>,
@@ -126,15 +159,21 @@ struct TestReporter {
 #[derive(Default)]
 struct TestReporterInner {
     completed: Mutex<Vec<u64>>,
+    cancelled: Mutex<Vec<u64>>,
     notify: Notify,
 }
 
 #[async_trait]
 impl ReportSink for TestReporter {
-    async fn report(&self, completed: Vec<u64>) -> Result<()> {
-        let mut guard = self.inner.completed.lock().await;
-        guard.extend(completed);
-        drop(guard);
+    async fn report(&self, completed: Vec<u64>, cancelled: Vec<u64>) -> Result<()> {
+        {
+            let mut guard = self.inner.completed.lock().await;
+            guard.extend(completed);
+        }
+        {
+            let mut guard = self.inner.cancelled.lock().await;
+            guard.extend(cancelled);
+        }
         self.inner.notify.notify_waiters();
         Ok(())
     }
@@ -159,6 +198,26 @@ impl TestReporter {
 
     async fn completed_async(&self) -> Vec<u64> {
         self.inner.completed.lock().await.clone()
+    }
+
+    async fn wait_for_cancelled(&self, expected: usize, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        loop {
+            {
+                let guard = self.inner.cancelled.lock().await;
+                if guard.len() >= expected {
+                    return;
+                }
+            }
+            if Instant::now() > deadline {
+                panic!("timed out waiting for cancellations");
+            }
+            self.inner.notify.notified().await;
+        }
+    }
+
+    async fn cancelled_async(&self) -> Vec<u64> {
+        self.inner.cancelled.lock().await.clone()
     }
 }
 
@@ -204,9 +263,49 @@ impl LatchingHandler {
     }
 }
 
+struct CancellableHandler {
+    started: Notify,
+    running: AtomicBool,
+}
+
+impl CancellableHandler {
+    fn new() -> Self {
+        Self {
+            started: Notify::new(),
+            running: AtomicBool::new(false),
+        }
+    }
+
+    async fn wait_started(&self, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if self.running.load(Ordering::SeqCst) {
+                return;
+            }
+            if Instant::now() > deadline {
+                panic!("timed out waiting for handler to start");
+            }
+            self.started.notified().await;
+        }
+    }
+}
+
+#[async_trait]
+impl WorkerHandler for CancellableHandler {
+    async fn handle(&self, assignment: LeaseAssignment) -> Result<WorkerReport> {
+        let (lease, token) = assignment.into_parts();
+        self.running.store(true, Ordering::SeqCst);
+        self.started.notify_waiters();
+        token.cancelled().await;
+        self.running.store(false, Ordering::SeqCst);
+        Ok(WorkerReport::cancelled(lease.lease_id))
+    }
+}
+
 #[async_trait]
 impl WorkerHandler for LatchingHandler {
-    async fn handle(&self, lease: Lease) -> Result<codecrafters_dns_server::workers::WorkerReport> {
+    async fn handle(&self, assignment: LeaseAssignment) -> Result<WorkerReport> {
+        let lease = assignment.lease();
         let inflight = self.current.fetch_add(1, Ordering::SeqCst) + 1;
         loop {
             let observed = self.peak.load(Ordering::SeqCst);
@@ -227,9 +326,7 @@ impl WorkerHandler for LatchingHandler {
         }
         let _permit = self.release.acquire().await.expect("semaphore closed");
         self.current.fetch_sub(1, Ordering::SeqCst);
-        Ok(codecrafters_dns_server::workers::WorkerReport::completed(
-            lease.lease_id,
-        ))
+        Ok(WorkerReport::completed(lease.lease_id))
     }
 }
 
@@ -247,12 +344,11 @@ impl PanicOnceHandler {
 
 #[async_trait]
 impl WorkerHandler for PanicOnceHandler {
-    async fn handle(&self, lease: Lease) -> Result<codecrafters_dns_server::workers::WorkerReport> {
+    async fn handle(&self, assignment: LeaseAssignment) -> Result<WorkerReport> {
+        let lease = assignment.lease();
         if !self.tripped.swap(true, Ordering::SeqCst) {
             panic!("intentional panic for testing");
         }
-        Ok(codecrafters_dns_server::workers::WorkerReport::completed(
-            lease.lease_id,
-        ))
+        Ok(WorkerReport::completed(lease.lease_id))
     }
 }

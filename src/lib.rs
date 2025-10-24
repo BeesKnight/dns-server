@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Ok, Result};
-use std::{mem::discriminant, net::Ipv4Addr};
+use std::net::Ipv4Addr;
 
 pub struct BytePacketBuf {
     pub buf: [u8; 512],
@@ -66,8 +66,7 @@ impl BytePacketBuf {
 
     #[allow(clippy::identity_op)]
     fn read_u32(&mut self) -> Result<u32> {
-        let res = 
-              ((self.read()? as u32) << 24)
+        let res = ((self.read()? as u32) << 24)
             | ((self.read()? as u32) << 16)
             | ((self.read()? as u32) << 8)
             | ((self.read()? as u32) << 0);
@@ -78,13 +77,13 @@ impl BytePacketBuf {
     #[allow(clippy::identity_op)]
     fn read_ipv4(&mut self) -> Result<Ipv4Addr> {
         let ip = self.read_u32().unwrap();
-            Ok(Ipv4Addr::new(
-                ((ip >> 24) & 0xFF) as u8,
-                ((ip >> 16) & 0xFF) as u8,
-                ((ip >> 8) & 0xFF) as u8,
-                ((ip >> 0) & 0xFF) as u8,
-            ))
-        }
+        Ok(Ipv4Addr::new(
+            ((ip >> 24) & 0xFF) as u8,
+            ((ip >> 16) & 0xFF) as u8,
+            ((ip >> 8) & 0xFF) as u8,
+            ((ip >> 0) & 0xFF) as u8,
+        ))
+    }
 
     pub fn read_qname(&mut self, outstr: &mut String) -> Result<()> {
         let mut pos = self.pos();
@@ -148,11 +147,11 @@ impl BytePacketBuf {
 
     pub fn write_u8(&mut self, val: u8) -> Result<()> {
         if self.pos >= 512 {
-            return Err(anyhow!("End of buffer"))
+            return Err(anyhow!("End of buffer"));
         }
         self.buf[self.pos] = val;
         self.pos += 1;
-        Ok(())        
+        Ok(())
     }
     // сделать write интерфейс, по дженерик типу. вставил
     // turbofish и погнал. функция сама поставит self.pos
@@ -169,19 +168,21 @@ impl BytePacketBuf {
     pub fn write_u32(&mut self, val: u32) -> Result<()> {
         self.write_u8(((val >> 24) & 0xff) as u8)?;
         self.write_u8(((val >> 16) & 0xff) as u8)?;
-        self.write_u8(((val >>  8) & 0xff) as u8)?;
-        self.write_u8(((val >>  0) & 0xff) as u8)?;
+        self.write_u8(((val >> 8) & 0xff) as u8)?;
+        self.write_u8(((val >> 0) & 0xff) as u8)?;
         Ok(())
     }
 
     pub fn write_qname(&mut self, qname: &str) -> Result<()> {
-        qname.split(".").filter(|label| { label.len() < 64 })
-        .for_each(| label| {
-            self.write_u8(label.len() as u8).unwrap();
-            label.as_bytes().iter().for_each(|lebal| {
-                self.write_u8(*lebal).unwrap();
+        qname
+            .split(".")
+            .filter(|label| label.len() < 64)
+            .for_each(|label| {
+                self.write_u8(label.len() as u8).unwrap();
+                label.as_bytes().iter().for_each(|lebal| {
+                    self.write_u8(*lebal).unwrap();
+                });
             });
-        });
         Ok(())
     }
 }
@@ -211,10 +212,10 @@ impl Default for Dns {
 impl Dns {
     pub fn new() -> Self {
         Self {
-            header:     DnsHeader::new(),
-            question:   Vec::new(),
-            answer:     Vec::new(),
-            authority:  Vec::new(),
+            header: DnsHeader::new(),
+            question: Vec::new(),
+            answer: Vec::new(),
+            authority: Vec::new(),
             additional: Vec::new(),
         }
     }
@@ -224,9 +225,9 @@ impl Dns {
         result.header.read(buffer)?;
 
         for _ in 0..result.header.qdcount {
-            let mut question = Question { 
-                qname: "".to_string(), 
-                qtype: QueryType::UNKNOWN(0)
+            let mut question = Question {
+                qname: "".to_string(),
+                qtype: QueryType::UNKNOWN(0),
             };
             question.read(buffer)?;
             result.question.push(question);
@@ -260,8 +261,8 @@ impl Dns {
 
         // сравнение пакетов с действительностью владеющих данных и возможностей
         // формирование ответа
-            // порядок записи
-            // методы для записи(то же самое как с чтением)
+        // порядок записи
+        // методы для записи(то же самое как с чтением)
         // кидать днс запрос гуглу(самостоятельно его создавать)
         // от него прочитывать и отдавать пользователю
         // или сразу передать его без чтения
@@ -342,17 +343,16 @@ impl std::fmt::Display for Flags {
 impl Flags {
     fn new() -> Self {
         Self {
-            response:             false,
-            opcode:               Opcode::Query,
+            response: false,
+            opcode: Opcode::Query,
             authoritative_answer: false,
-            truncated_message:    false,
-            recursion_desired:    false,
+            truncated_message: false,
+            recursion_desired: false,
 
-            recursion_available:  false,
-            z:                    0,
-            rescode:              ResultCode::NOERROR 
+            recursion_available: false,
+            z: 0,
+            rescode: ResultCode::NOERROR,
         }
-        
     }
 }
 
@@ -394,7 +394,7 @@ enum Opcode {
 
 impl Opcode {
     pub fn discriminant(&self) -> u8 {
-        // SAFETY: беру первый байт объекта enum, 
+        // SAFETY: беру первый байт объекта enum,
         // который отвечает за сопоставление
         // - дискриминант
         // пока экспериментальый функционал. посмотрим пригодится ли.
@@ -406,7 +406,6 @@ impl Opcode {
 
 impl From<u8> for Opcode {
     fn from(opcode: u8) -> Opcode {
-
         match opcode {
             0 => Opcode::Query,
             1 => Opcode::IQuery,
@@ -473,28 +472,24 @@ pub struct Question {
 }
 
 impl Question {
-
     pub fn new(name: String, qtype: QueryType) -> Question {
-        Question {
-            qname: name,
-            qtype,
-        }
+        Question { qname: name, qtype }
     }
     pub fn read(&mut self, buffer: &mut BytePacketBuf) -> Result<()> {
         buffer.read_qname(&mut self.qname)?;
-        self.qtype  = buffer.read_u16()?.into();
-        let _ = buffer.read_u16()?; // qclass  
+        self.qtype = buffer.read_u16()?.into();
+        let _ = buffer.read_u16()?; // qclass
         Ok(())
     }
 }
 
 #[derive(Debug)]
 pub struct ResourceRecord {
-    name:  String,
+    name: String,
     rtype: QueryType,
     class: u16,
-    ttl:   u32,
-    len:   u16,
+    ttl: u32,
+    len: u16,
 }
 
 #[derive(Debug)]
@@ -524,15 +519,15 @@ impl From<QueryType> for u16 {
 #[derive(Debug)]
 pub enum DnsRecord {
     UNKNOWN {
-        domain:   String,
-        rtype:    QueryType,
+        domain: String,
+        rtype: QueryType,
         data_len: u16,
-        ttl:      u32,
+        ttl: u32,
     },
     A {
-        domain:   String,
-        addr:     Ipv4Addr,
-        ttl:      u32,
+        domain: String,
+        addr: Ipv4Addr,
+        ttl: u32,
     },
 }
 
@@ -544,26 +539,22 @@ impl DnsRecord {
         let _ = buffer.read_u16()?; // qclass
         let ttl = buffer.read_u32()?;
         let data_len = buffer.read_u16()?;
-        
+
         match rtype {
             QueryType::A => {
                 let addr = buffer.read_ipv4()?;
-                Ok(DnsRecord::A { 
-                    domain, 
-                    addr, 
-                    ttl
-                })
-            },
+                Ok(DnsRecord::A { domain, addr, ttl })
+            }
             QueryType::UNKNOWN(_) => {
                 buffer.step(data_len.into())?;
-                Ok(DnsRecord::UNKNOWN { 
-                    domain, 
-                    rtype, 
-                    data_len, 
-                    ttl
+                Ok(DnsRecord::UNKNOWN {
+                    domain,
+                    rtype,
+                    data_len,
+                    ttl,
                 })
-            },
-        } 
+            }
+        }
     }
 
     pub fn write(&self, buffer: &mut BytePacketBuf) -> Result<usize> {
@@ -571,11 +562,7 @@ impl DnsRecord {
 
         match self {
             DnsRecord::UNKNOWN { .. } => Ok(println!("skipping record")),
-            DnsRecord::A {
-                domain,
-                addr,
-                ttl 
-            } => {
+            DnsRecord::A { domain, addr, ttl } => {
                 buffer.write_qname(domain)?;
                 buffer.write_u16(QueryType::A.into())?;
                 buffer.write_u16(1)?;
@@ -588,12 +575,12 @@ impl DnsRecord {
                 buffer.write_u8(octets[2])?;
                 buffer.write_u8(octets[3])?;
                 Ok(())
-            },
-        }.unwrap();
+            }
+        }
+        .unwrap();
         Ok(buffer.pos() - start_pos)
     }
 }
-
 
 #[cfg(test)]
 mod test {

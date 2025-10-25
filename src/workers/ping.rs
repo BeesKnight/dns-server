@@ -477,8 +477,8 @@ impl PingOutcome {
             (None, None, None, None)
         } else {
             rtts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            let min = Some(*rtts.first().unwrap());
-            let max = Some(*rtts.last().unwrap());
+            let min = rtts.first().copied();
+            let max = rtts.last().copied();
             let sum: f64 = rtts.iter().sum();
             let avg = sum / rtts.len() as f64;
             let variance = rtts

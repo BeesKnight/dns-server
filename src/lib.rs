@@ -147,7 +147,7 @@ impl BytePacketBuf {
 
     #[allow(clippy::identity_op)]
     fn read_ipv4(&mut self) -> Result<Ipv4Addr> {
-        let ip = self.read_u32().unwrap();
+        let ip = self.read_u32()?;
         Ok(Ipv4Addr::new(
             ((ip >> 24) & 0xFF) as u8,
             ((ip >> 16) & 0xFF) as u8,
@@ -263,15 +263,12 @@ impl BytePacketBuf {
     }
 
     pub fn write_qname(&mut self, qname: &str) -> Result<()> {
-        qname
-            .split(".")
-            .filter(|label| label.len() < 64)
-            .for_each(|label| {
-                self.write_u8(label.len() as u8).unwrap();
-                label.as_bytes().iter().for_each(|lebal| {
-                    self.write_u8(*lebal).unwrap();
-                });
-            });
+        for label in qname.split('.').filter(|label| label.len() < 64) {
+            self.write_u8(label.len() as u8)?;
+            for byte in label.as_bytes() {
+                self.write_u8(*byte)?;
+            }
+        }
         self.write_u8(0)?;
         Ok(())
     }

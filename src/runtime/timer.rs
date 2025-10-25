@@ -118,8 +118,7 @@ impl TimerService {
         self.schedule(delay, async move {
             let _ = tx.send(());
         })?;
-        let _ = rx.await;
-        Ok(())
+        rx.await.map_err(|_| TimerError::Closed)
     }
 }
 
@@ -175,9 +174,10 @@ async fn fire_due(queue: &mut BinaryHeap<ScheduledTimer>) {
         if timer.when > now {
             break;
         }
-        let timer = queue.pop().expect("timer present");
-        record_fire_metrics(now, timer.when);
-        timer.spawn();
+        if let Some(timer) = queue.pop() {
+            record_fire_metrics(now, timer.when);
+            timer.spawn();
+        }
     }
     update_depth_metric(queue.len());
 }
@@ -215,7 +215,10 @@ mod tests {
         let fired = Arc::new(AtomicBool::new(false));
         let fired_clone2 = fired.clone();
         tokio::spawn(async move {
-            timer.sleep(Duration::from_millis(40)).await.unwrap();
+            timer
+                .sleep(Duration::from_millis(40))
+                .await
+                .expect("timer should complete under virtual time");
             fired_clone2.store(true, AtomicOrdering::SeqCst);
         });
         tokio::task::yield_now().await;

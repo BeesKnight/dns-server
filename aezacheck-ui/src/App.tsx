@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import AuthPage from "./pages/Auth";
 import Home from "./pages/Home";
+import Services from "./pages/Services"; // <- добавили
 import { useAuth } from "./store/auth";
 
 /** Защищённый маршрут: ждём bootstrap(), потом пускаем только если user есть */
@@ -23,8 +24,8 @@ function Protected({ children }: { children: React.ReactElement }) {
     };
   }, [bootstrap]);
 
-  if (!booted) return null;                // можно отрендерить сплэш
-  if (!user) return <Navigate to="/" replace />; // не авторизован → на логин
+  if (!booted) return null; // тут можно показать сплэш/скелетон
+  if (!user) return <Navigate to="/" replace />; // не авторизован → логин
   return children;
 }
 
@@ -34,6 +35,7 @@ export default function App() {
       <Routes>
         {/* старт — логин/регистрация */}
         <Route path="/" element={<AuthPage />} />
+
         {/* приложение — только после входа */}
         <Route
           path="/app"
@@ -43,6 +45,15 @@ export default function App() {
             </Protected>
           }
         />
+        <Route
+          path="/app/services"
+          element={
+            <Protected>
+              <Services />
+            </Protected>
+          }
+        />
+
         {/* fallback */}
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

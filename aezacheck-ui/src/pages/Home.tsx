@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import MapGlobe from "../components/MapGlobe";
 import Map2D from "../components/Map2D";
 import CheckSheet from "../components/CheckSheet";
@@ -23,7 +24,7 @@ export default function Home() {
     <div className="relative min-h-screen overflow-hidden">
       <BgFX />
 
-      {/* переключатель */}
+      {/* переключатель слева */}
       <div className="absolute left-4 top-4 z-50">
         <div className="flex rounded-xl bg-black/30 backdrop-blur-md ring-1 ring-white/10 overflow-hidden">
           <button
@@ -41,6 +42,26 @@ export default function Home() {
             3D
           </button>
         </div>
+      </div>
+
+      {/* Кнопка справа сверху (стеклянный стиль проекта) */}
+      <div className="absolute right-4 top-4 z-50 flex items-center gap-2">
+        <Link
+          to="/app/services"
+          className="inline-flex items-center gap-2 rounded-xl border border-white/10
+                     bg-black/30 hover:bg-white/10 backdrop-blur-md
+                     px-3 py-2 text-sm font-semibold text-slate-200 shadow-lg transition"
+          aria-label="Открыть популярные сервисы"
+        >
+          {/* иконка-сетка */}
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <rect x="3"  y="3"  width="7" height="7" rx="2" stroke="currentColor" strokeWidth="1.6"/>
+            <rect x="14" y="3"  width="7" height="7" rx="2" stroke="currentColor" strokeWidth="1.6"/>
+            <rect x="3"  y="14" width="7" height="7" rx="2" stroke="currentColor" strokeWidth="1.6"/>
+            <rect x="14" y="14" width="7" height="7" rx="2" stroke="currentColor" strokeWidth="1.6"/>
+          </svg>
+          Сервисы
+        </Link>
       </div>
 
       {/* карта */}

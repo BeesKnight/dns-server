@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+OUTPUT_DIR="{{ telemetry_metrics_textfile_dir }}"
+TMP_FILE="${OUTPUT_DIR}/dns_observability.prom.$$"
+REDIS_QUEUE="{{ telemetry_metrics_redis_queue }}"
+REDIS_URL="{{ telemetry_metrics_redis_url }}"
+RATE_PATTERN="{{ telemetry_metrics_rate_limit_pattern }}"
+DNS_PATTERN='{{ telemetry_metrics_dns_latency_pattern }}'
+trap 'rm -f "${TMP_FILE}"' EXIT
+INTERVAL_VALUE=$(echo "{{ telemetry_metrics_interval }}" | sed 's/[^0-9]*$//')
+INTERVAL_UNIT=$(echo "{{ telemetry_metrics_interval }}" | sed 's/[0-9]*//g')
+case "${INTERVAL_UNIT}" in
+  s|S|sec|seconds|Second|Seconds)
+    INTERVAL_SECONDS=${INTERVAL_VALUE}
+    ;;
+  m|M|min|minutes|Minute|Minutes)
+    INTERVAL_SECONDS=$((INTERVAL_VALUE * 60))
+    ;;
+  h|H|hr|hours|Hour|Hours)
+    INTERVAL_SECONDS=$((INTERVAL_VALUE * 3600))
+    ;;
+  *)
+    INTERVAL_SECONDS=${INTERVAL_VALUE}
+    ;;
+esac
+
+now_ts=$(date +%s)
+one_minute_ago=$((now_ts - INTERVAL_SECONDS))
+
+journal_query="--since=@${one_minute_ago}"
+
+rate_limit_hits=$(journalctl -o cat ${journal_query} | grep -E "${RATE_PATTERN}" | wc -l || true)
+
+redis_queue_depth=$(redis-cli -u "${REDIS_URL}" llen "${REDIS_QUEUE}" 2>/dev/null || echo 0)
+
+latency_sum=0
+latency_samples=0
+while IFS= read -r line; do
+  if [[ $line =~ ${DNS_PATTERN} ]]; then
+    latency="${BASH_REMATCH[1]}"
+    latency_sum=$((latency_sum + latency))
+    latency_samples=$((latency_samples + 1))
+  fi
+done < <(journalctl -o cat -u dns-agent.service ${journal_query} || true)
+
+if [[ ${latency_samples} -gt 0 ]]; then
+  latency_avg=$(echo "scale=4; ${latency_sum} / ${latency_samples}" | bc)
+else
+  latency_avg=0
+fi
+
+heartbeat_lag=0
+{% if telemetry_jobs_database_dsn %}
+heartbeat_lag=$(psql "{{ telemetry_jobs_database_dsn }}" -Atc "SELECT COALESCE(EXTRACT(EPOCH FROM NOW() - MAX(heartbeat_at)), 0) FROM jobs.leases" 2>/dev/null || echo 0)
+{% fi %}
+
+cat <<METRICS > "${TMP_FILE}"
+# HELP dns_rate_limit_hits_total Number of rate limit events observed in the last interval
+# TYPE dns_rate_limit_hits_total gauge
+dns_rate_limit_hits_total ${rate_limit_hits}
+# HELP dns_redis_queue_depth Current Redis queue depth for agent dispatch
+# TYPE dns_redis_queue_depth gauge
+dns_redis_queue_depth ${redis_queue_depth}
+# HELP dns_agent_latency_average Average DNS agent latency over the last interval in {{ telemetry_metrics_dns_unit }}
+# TYPE dns_agent_latency_average gauge
+dns_agent_latency_average ${latency_avg}
+# HELP jobs_agent_heartbeat_lag_seconds Maximum heartbeat lag observed for agents in seconds
+# TYPE jobs_agent_heartbeat_lag_seconds gauge
+jobs_agent_heartbeat_lag_seconds ${heartbeat_lag}
+METRICS
+
+mv "${TMP_FILE}" "${OUTPUT_DIR}/dns_observability.prom"

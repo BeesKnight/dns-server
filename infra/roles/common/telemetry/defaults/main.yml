@@ -1,0 +1,35 @@
+---
+telemetry_enable_promtail: true
+telemetry_promtail_package: promtail
+telemetry_promtail_user: promtail
+telemetry_promtail_group: promtail
+telemetry_promtail_config_dir: /etc/promtail
+telemetry_promtail_config_path: "{{ telemetry_promtail_config_dir }}/config.yml"
+telemetry_promtail_positions_dir: /var/lib/promtail
+telemetry_promtail_service: promtail
+telemetry_loki_endpoint: https://loki.example.com/loki/api/v1/push
+telemetry_loki_tls_insecure: false
+telemetry_loki_basic_auth: null
+telemetry_promtail_extra_labels: {}
+telemetry_promtail_jobs:
+  - name: systemd-journal
+    journal_path: /var/log/journal
+telemetry_promtail_scrape_min_age: 1m
+telemetry_enable_metrics_exporter: true
+telemetry_metrics_script_path: /usr/local/bin/dns-observability-metrics.sh
+telemetry_metrics_service: dns-observability-metrics.service
+telemetry_metrics_timer: dns-observability-metrics.timer
+telemetry_metrics_interval: 1m
+telemetry_metrics_textfile_dir: /var/lib/node_exporter/textfile_collector
+telemetry_metrics_rate_limit_pattern: "rate limit exceeded"
+telemetry_metrics_dns_latency_pattern: "latency_ms=(?P<latency>[0-9]+)"
+telemetry_metrics_dns_unit: ms
+telemetry_metrics_redis_url: redis://localhost:6379/0
+telemetry_metrics_redis_queue: agent:dispatch
+telemetry_jobs_database_dsn: null
+telemetry_jobs_heartbeat_threshold_seconds: 180
+telemetry_enable_alerts: false
+telemetry_prometheus_rules_dir: /etc/prometheus/rules.d
+telemetry_alert_rule_filename: dns-agent-heartbeat.rules.yml
+telemetry_alert_severity: critical
+telemetry_alert_for: 5m

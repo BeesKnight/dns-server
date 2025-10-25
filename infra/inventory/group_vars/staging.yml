@@ -1,0 +1,10 @@
+---
+agent_max_inflight: 4096
+agent_dns_upstream_timeout_ms: 2500
+telemetry_loki_endpoint: https://loki.staging.example.com/loki/api/v1/push
+telemetry_metrics_redis_url: redis://redis:6379/0
+telemetry_metrics_redis_queue: agent:dispatch:staging
+telemetry_jobs_database_dsn: "host=postgres dbname=jobs user=jobs password={{ vault_jobs_db_password | default('jobs') }}"
+telemetry_enable_alerts: true
+telemetry_jobs_heartbeat_threshold_seconds: 180
+telemetry_prometheus_rules_dir: /etc/prometheus/rules.d/staging

@@ -1,0 +1,28 @@
+# Managed by Ansible - DNS agent systemd unit
+[Unit]
+Description=AezaCheck DNS Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ dns_agent_user }}
+Group={{ dns_agent_group }}
+EnvironmentFile=-{{ dns_agent_env_file }}
+EnvironmentFile=-{{ dns_agent_secrets_file }}
+ExecStart={{ dns_agent_binary_path }}
+ExecStartPost={{ dns_agent_healthcheck_script }}
+ExecStartPost={{ dns_agent_firewall_script }}
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE={{ dns_agent_limit_nofile }}
+CPUQuota={{ dns_agent_cpu_quota }}
+MemoryMax={{ dns_agent_memory_max }}
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+RuntimeDirectory=dns-agent
+RuntimeDirectoryMode=0750
+
+[Install]
+WantedBy=multi-user.target

@@ -95,6 +95,17 @@
     mode: "0644"
   notify: restart go app service
 
+- name: Register service discovery configuration
+  ansible.builtin.template:
+    src: "service-discovery.json.j2"
+    dest: "{{ go_app_service_discovery_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: go_app_register_in_service_discovery
+  notify:
+    - reload service discovery backend
+
 - name: Ensure pgcrypto extension is available
   ansible.builtin.command: >-
     psql {{ '-h ' + go_app_database_host if go_app_database_host else '' }}

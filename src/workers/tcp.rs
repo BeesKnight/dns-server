@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use serde_json::json;
+use socket2::{SockRef, TcpKeepalive};
 use tokio::net::TcpSocket;
 use tokio::task;
 use tokio::time::{sleep, Instant};

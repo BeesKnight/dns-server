@@ -165,6 +165,7 @@ pub struct AgentRegistration {
     pub agent_id: AgentId,
     pub lease_duration: Duration,
     pub heartbeat_timeout: Duration,
+    pub auth_token: String,
 }
 
 #[derive(Debug, Clone)]
@@ -537,6 +538,7 @@ impl MockBackendDriver {
                                 agent_id,
                                 lease_duration: behavior.lease_duration,
                                 heartbeat_timeout: behavior.heartbeat_timeout,
+                                auth_token: format!("token-{}", agent_id.0),
                             }));
                         }
                         BackendRequest::Heartbeat { agent, respond_to } => {

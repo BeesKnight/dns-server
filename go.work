@@ -1,8 +1,0 @@
-go 1.25.3
-
-use (
-  ./dev/auth-svc
-  ./dev/sites-svc
-  ./dev/jobs-svc
-  ./dev/api-gw
-)

@@ -1,0 +1,13 @@
+---
+- name: restart go app service
+  ansible.builtin.systemd:
+    name: "{{ go_app_systemd_unit }}"
+    state: restarted
+    daemon_reload: true
+
+- name: reload service discovery backend
+  ansible.builtin.systemd:
+    name: "{{ go_app_service_discovery_service }}"
+    state: reloaded
+    daemon_reload: true
+  when: go_app_service_discovery_service is not none

@@ -1,0 +1,12 @@
+# Managed by Ansible
+daemonize no
+bind {{ redis_bind_address }}
+port {{ redis_port }}
+dir {{ redis_data_dir }}
+protected-mode no
+{% if redis_password %}
+requirepass {{ redis_password }}
+masterauth {{ redis_password }}
+{% endif %}
+appendonly {{ redis_appendonly }}
+maxmemory-policy {{ redis_maxmemory_policy }}

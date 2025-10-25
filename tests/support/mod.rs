@@ -15,7 +15,7 @@ use thiserror::Error;
 use tokio::{
     select,
     sync::{mpsc, oneshot, watch, Mutex as AsyncMutex, Notify},
-    task::JoinHandle,
+    task::{JoinHandle, JoinSet},
     time::{self, Instant},
 };
 use tokio_util::sync::CancellationToken;
@@ -28,6 +28,7 @@ use dns_agent::lease_extender::{
     spawn_lease_extender, LeaseExtendClient, LeaseExtendUpdate, LeaseExtenderClient,
     LeaseExtenderConfig, LeaseExtenderHandle,
 };
+use dns_agent::runtime::TimerService;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub enum TaskType {
@@ -164,6 +165,7 @@ pub struct AgentRegistration {
     pub agent_id: AgentId,
     pub lease_duration: Duration,
     pub heartbeat_timeout: Duration,
+    pub auth_token: String,
 }
 
 #[derive(Debug, Clone)]
@@ -536,6 +538,7 @@ impl MockBackendDriver {
                                 agent_id,
                                 lease_duration: behavior.lease_duration,
                                 heartbeat_timeout: behavior.heartbeat_timeout,
+                                auth_token: format!("token-{}", agent_id.0),
                             }));
                         }
                         BackendRequest::Heartbeat { agent, respond_to } => {
@@ -972,6 +975,7 @@ pub struct PipelineHandle {
     worker_handles: Vec<JoinHandle<()>>,
     stats: Arc<PipelineStats>,
     lease_extender: LeaseExtenderHandle,
+    timer: TimerService,
 }
 
 impl PipelineHandle {
@@ -979,10 +983,16 @@ impl PipelineHandle {
         Arc::clone(&self.stats)
     }
 
+    pub fn timer(&self) -> TimerService {
+        self.timer.clone()
+    }
+
     pub async fn wait_for_total(&self, expected: u64, timeout: Duration) {
         let deadline = Instant::now() + timeout;
         while self.stats.total_completed() < expected && Instant::now() < deadline {
-            time::sleep(Duration::from_millis(10)).await;
+            if self.timer.sleep(Duration::from_millis(10)).await.is_err() {
+                break;
+            }
         }
     }
 
@@ -1006,6 +1016,7 @@ impl AgentPipeline {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let (agent_tx, agent_rx) = watch::channel::<Option<AgentId>>(None);
         let notify = Arc::new(Notify::new());
+        let timer = TimerService::new();
 
         let extender_backend = BackendExtender::new(backend.clone(), stats.clone());
         let extender_config = LeaseExtenderConfig {
@@ -1050,11 +1061,12 @@ impl AgentPipeline {
                         return;
                     }
                 };
+                let mut joinset = JoinSet::new();
                 while let Some(cmd) = rx.recv().await {
                     let backend_task = backend_clone.clone();
                     let stats_task = stats_clone.clone();
                     let notify_task = notify_clone.clone();
-                    tokio::spawn(process_task(
+                    joinset.spawn(process_task(
                         agent_id,
                         kind,
                         latency,
@@ -1064,6 +1076,7 @@ impl AgentPipeline {
                         cmd,
                     ));
                 }
+                while joinset.join_next().await.is_some() {}
             });
             worker_handles.push(handle);
         }
@@ -1072,6 +1085,7 @@ impl AgentPipeline {
         let mut heartbeat_shutdown = shutdown_rx.clone();
         let mut heartbeat_agent_rx = agent_rx.clone();
         let heartbeat_interval = config.heartbeat_interval;
+        let timer_heartbeat = timer.clone();
         let heartbeat = tokio::spawn(async move {
             let agent_id = loop {
                 if let Some(agent) = *heartbeat_agent_rx.borrow() {
@@ -1088,7 +1102,10 @@ impl AgentPipeline {
                             break;
                         }
                     }
-                    _ = time::sleep(heartbeat_interval) => {
+                    _ = async {
+                        let timer = timer_heartbeat.clone();
+                        let _ = timer.sleep(heartbeat_interval).await;
+                    } => {
                         let _ = backend_clone.heartbeat(agent_id).await;
                     }
                 }
@@ -1103,6 +1120,7 @@ impl AgentPipeline {
             let notify = notify.clone();
             let extender_backend_loop = extender_backend.clone();
             let lease_extender_client_loop = lease_extender_client.clone();
+            let timer_worker = timer.clone();
             tokio::spawn(async move {
                 let registration = backend.register().await.expect("register succeeded");
                 let agent_id = registration.agent_id;
@@ -1158,7 +1176,8 @@ impl AgentPipeline {
                     {
                         Ok(batch) => {
                             if batch.leases.is_empty() {
-                                time::sleep(Duration::from_millis(10)).await;
+                                let timer_clone = timer_worker.clone();
+                                let _ = timer_clone.sleep(Duration::from_millis(10)).await;
                                 continue;
                             }
                             for lease in batch.leases {
@@ -1182,7 +1201,8 @@ impl AgentPipeline {
                             }
                         }
                         Err(_) => {
-                            time::sleep(Duration::from_millis(20)).await;
+                            let timer_clone = timer_worker.clone();
+                            let _ = timer_clone.sleep(Duration::from_millis(20)).await;
                         }
                     }
                 }
@@ -1197,6 +1217,7 @@ impl AgentPipeline {
             worker_handles,
             stats,
             lease_extender: lease_extender_handle,
+            timer,
         }
     }
 }

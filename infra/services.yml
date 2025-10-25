@@ -1,0 +1,37 @@
+---
+- name: Configure telemetry stack
+  hosts: all
+  become: true
+  roles:
+    - common/telemetry
+
+- name: Deploy auth service
+  hosts: auth_svc
+  become: true
+  roles:
+    - services/go_app
+
+- name: Deploy sites service
+  hosts: sites_svc
+  become: true
+  roles:
+    - services/go_app
+
+- name: Deploy jobs service
+  hosts: jobs_svc
+  become: true
+  roles:
+    - geoip
+    - services/go_app
+
+- name: Deploy API gateway
+  hosts: api_gw
+  become: true
+  roles:
+    - services/go_app
+
+- name: Deploy DNS agents
+  hosts: dns_agents
+  become: true
+  roles:
+    - services/dns_agent

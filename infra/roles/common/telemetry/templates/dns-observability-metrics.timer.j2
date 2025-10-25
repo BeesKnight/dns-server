@@ -1,0 +1,11 @@
+# Managed by Ansible - metrics exporter timer
+[Unit]
+Description=Run DNS observability metrics exporter on schedule
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec={{ telemetry_metrics_interval }}
+Unit={{ telemetry_metrics_service }}
+
+[Install]
+WantedBy=timers.target

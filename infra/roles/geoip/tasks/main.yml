@@ -1,0 +1,72 @@
+---
+- name: Ensure GeoIP license key is provided
+  ansible.builtin.fail:
+    msg: "The variable geoip_maxmind_license_key must be set to download GeoLite2 databases"
+  when: (geoip_maxmind_license_key | default('')) | length == 0
+
+- name: Ensure required packages are installed
+  ansible.builtin.package:
+    name: "{{ geoip_required_packages }}"
+    state: present
+
+- name: Ensure GeoIP data directory exists
+  ansible.builtin.file:
+    path: "{{ geoip_data_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Ensure GeoIP license directory exists
+  ansible.builtin.file:
+    path: "{{ geoip_license_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Install GeoIP license key file
+  ansible.builtin.copy:
+    dest: "{{ geoip_license_file }}"
+    content: "{{ geoip_maxmind_license_key }}\n"
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Install GeoIP update script
+  ansible.builtin.template:
+    src: geoip-update.sh.j2
+    dest: "{{ geoip_update_script_path }}"
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Install GeoIP update systemd service
+  ansible.builtin.template:
+    src: geoip-update.service.j2
+    dest: "/etc/systemd/system/{{ geoip_update_service }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: reload systemd
+
+- name: Install GeoIP update systemd timer
+  ansible.builtin.template:
+    src: geoip-update.timer.j2
+    dest: "/etc/systemd/system/{{ geoip_update_timer }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: reload systemd
+
+- name: Ensure GeoIP update timer is enabled and running
+  ansible.builtin.systemd:
+    name: "{{ geoip_update_timer }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Run GeoIP update immediately
+  ansible.builtin.command: "{{ geoip_update_script_path }}"
+  register: geoip_update_run
+  changed_when: '"GeoIP databases updated" in (geoip_update_run.stdout | default(''))'

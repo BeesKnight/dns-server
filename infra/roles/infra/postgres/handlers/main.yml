@@ -1,0 +1,19 @@
+---
+- name: restart postgres
+  become: true
+  ansible.builtin.service:
+    name: "{{ postgres_service_name }}"
+    state: restarted
+
+- name: postgres healthcheck
+  listen: healthcheck
+  ansible.builtin.command: >-
+    /usr/bin/pg_isready -h {{ POSTGRES_HOST | default('127.0.0.1') }}
+    -p {{ postgres_port }}
+    -d {{ postgres_db }}
+    -U {{ postgres_superuser }}
+  register: postgres_healthcheck_result
+  changed_when: false
+  retries: 10
+  delay: 3
+  until: postgres_healthcheck_result.rc == 0

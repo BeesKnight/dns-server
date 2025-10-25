@@ -1,0 +1,72 @@
+# Managed by Ansible - promtail configuration
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: "{{ telemetry_promtail_positions_dir }}/positions.yaml"
+
+clients:
+  - url: "{{ telemetry_loki_endpoint }}"
+    {% if telemetry_loki_basic_auth %}basic_auth:
+      username: "{{ telemetry_loki_basic_auth.username }}"
+      password: "{{ telemetry_loki_basic_auth.password }}"
+    {% endif %}
+    tls_config:
+      insecure_skip_verify: {{ telemetry_loki_tls_insecure | bool | lower }}
+
+scrape_configs:
+{% for job in telemetry_promtail_jobs %}
+  - job_name: "{{ job.name }}"
+    journal:
+      max_age: {{ telemetry_promtail_scrape_min_age }}
+      json: false
+      labels:
+        job: "{{ job.name }}"
+        host: "{{ inventory_hostname }}"
+{% for key, value in telemetry_promtail_extra_labels.items() %}
+        {{ key }}: "{{ value }}"
+{% endfor %}
+    relabel_configs:
+      - source_labels: ['__journal__systemd_unit']
+        target_label: unit
+    pipeline_stages:
+      - match:
+          selector: '{unit=~".*\.service"}'
+          stages:
+            - labeldrop:
+                - filename
+            - logfmt:
+                mapping:
+                  level: level
+                  logger: logger
+                  msg: msg
+            - match:
+                selector: '{unit=~".*go.*"}'
+                stages:
+                  - regex:
+                      expression: '(?P<logger_name>.*)\\.(?P<severity>Info|Warn|Error|Debug)'
+                      source: logger
+                      optional: true
+                  - template:
+                      source: '{{ ToLower .severity }}'
+                      target: severity
+                  - labels:
+                      logger: logger_name
+                      severity: severity
+                  - replace:
+                      expression: '^(?P<ts>[^ ]+) (?P<message>.*)$'
+                      source: msg
+                      replace: '${message}'
+            - match:
+                selector: '{unit=~".*dns-agent.*"}'
+                stages:
+                  - json:
+                      expressions:
+                        span_id: span_id
+                        trace_id: trace_id
+                        message: msg
+                  - labels:
+                      trace_id: trace_id
+                      span_id: span_id
+{% endfor %}

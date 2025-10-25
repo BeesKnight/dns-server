@@ -1,0 +1,22 @@
+---
+dns_agent_user: aezacheck
+dns_agent_group: aezacheck
+dns_agent_install_dir: /opt/aezacheck/agent
+dns_agent_env_dir: /etc/aezacheck/dns-agent
+dns_agent_env_file: "{{ dns_agent_install_dir }}/dns-agent.env"
+dns_agent_secrets_file: "{{ dns_agent_env_dir }}/secrets.env"
+dns_agent_binary_path: "{{ dns_agent_install_dir }}/dns_agent"
+dns_agent_unit_name: dns-agent.service
+dns_agent_firewall_script: /opt/aezacheck/agent/bin/dns-agent-firewall.sh
+dns_agent_healthcheck_script: /opt/aezacheck/agent/bin/dns-agent-healthcheck.sh
+dns_agent_log_dir: /var/log/dns-agent
+dns_agent_limit_nofile: 65536
+dns_agent_cpu_quota: 80%
+dns_agent_memory_max: 512M
+dns_agent_control_plane: https://api-gw.example.com/v1/agents/
+dns_agent_dns_listen: 0.0.0.0:2053
+dns_agent_dns_upstream: 1.1.1.1:53
+dns_agent_dns_upstream_timeout_ms: "{{ agent_dns_upstream_timeout_ms | default(2500) }}"
+dns_agent_max_inflight: "{{ agent_max_inflight | default(4096) }}"
+dns_agent_trace_workers: 4
+dns_agent_enable_service: true

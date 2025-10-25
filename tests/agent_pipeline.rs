@@ -338,6 +338,41 @@ worker_test!(pipeline_tcp_worker_produces_observations, {
     );
 });
 
+#[tokio::test]
+async fn pipeline_wait_for_total_respects_virtual_time() {
+    tokio::time::pause();
+    let (backend, control, driver) = MockBackend::new();
+    let config = AgentPipelineConfig::new(1);
+    let pipeline = AgentPipeline::spawn(backend.clone(), config);
+
+    let timer = pipeline.timer();
+    let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let fired_clone = fired.clone();
+    timer
+        .schedule(Duration::from_millis(40), async move {
+            fired_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+        })
+        .expect("schedule timer");
+
+    tokio::time::advance(Duration::from_millis(30)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        !fired.load(std::sync::atomic::Ordering::SeqCst),
+        "timer fired before expected"
+    );
+
+    tokio::time::advance(Duration::from_millis(20)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        fired.load(std::sync::atomic::Ordering::SeqCst),
+        "timer did not fire after advancing time"
+    );
+
+    let _ = pipeline.shutdown().await;
+    control.shutdown().await;
+    let _ = driver.await;
+}
+
 #[derive(Clone, Default)]
 struct CollectingReporter {
     inner: Arc<CollectingReporterInner>,

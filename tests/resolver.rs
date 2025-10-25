@@ -231,6 +231,7 @@ async fn resolver_falls_back_to_tcp_on_truncation() {
 
 #[tokio::test]
 async fn resolver_obeys_ttl_cache() {
+    tokio::time::pause();
     let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let addr = udp.local_addr().unwrap();
     let requests = Arc::new(AtomicUsize::new(0));
@@ -304,7 +305,8 @@ async fn resolver_obeys_ttl_cache() {
         .resolve("ttl.example")
         .await
         .expect("first resolve succeeded");
-    tokio::time::sleep(Duration::from_millis(1100)).await;
+    tokio::time::advance(Duration::from_millis(1100)).await;
+    tokio::task::yield_now().await;
     resolver
         .resolve("ttl.example")
         .await
@@ -321,28 +323,57 @@ async fn resolver_deduplicates_singleflight() {
     let requests = Arc::new(AtomicUsize::new(0));
     let notify = Arc::new(Notify::new());
     let proceed = Arc::new(Notify::new());
+    const EXPECTED_REQUESTS: usize = 5;
     let udp_task = {
         let requests = requests.clone();
         let notify = notify.clone();
         let proceed = proceed.clone();
         tokio::spawn(async move {
             let mut buf = vec![0u8; 2048];
-            let (len, peer) = udp.recv_from(&mut buf).await.unwrap();
-            requests.fetch_add(1, Ordering::SeqCst);
-            notify.notify_waiters();
-            proceed.notified().await;
-            let message = copy_into_packet(&buf[..len]);
-            let question = message.question.first().unwrap();
-            let response = make_response(
-                message.header.id,
-                &question.qname,
-                DnsRecord::A {
-                    domain: question.qname.clone(),
-                    addr: Ipv4Addr::new(7, 7, 7, 7),
-                    ttl: 300,
-                },
-            );
-            udp.send_to(&response, peer).await.unwrap();
+            loop {
+                let (len, peer) = udp.recv_from(&mut buf).await.unwrap();
+                let current = requests.fetch_add(1, Ordering::SeqCst);
+                if current == 0 {
+                    notify.notify_waiters();
+                    proceed.notified().await;
+                }
+                let message = copy_into_packet(&buf[..len]);
+                let question = message.question.first().unwrap();
+                let record = match question.qtype {
+                    QueryType::A => DnsRecord::A {
+                        domain: question.qname.clone(),
+                        addr: Ipv4Addr::new(7, 7, 7, 7),
+                        ttl: 300,
+                    },
+                    QueryType::AAAA => DnsRecord::AAAA {
+                        domain: question.qname.clone(),
+                        addr: Ipv6Addr::LOCALHOST,
+                        ttl: 300,
+                    },
+                    QueryType::MX => DnsRecord::MX {
+                        domain: question.qname.clone(),
+                        preference: 10,
+                        exchange: "mail.singleflight".to_string(),
+                        ttl: 300,
+                    },
+                    QueryType::NS => DnsRecord::NS {
+                        domain: question.qname.clone(),
+                        host: "ns.singleflight".to_string(),
+                        ttl: 300,
+                    },
+                    QueryType::TXT => DnsRecord::TXT {
+                        domain: question.qname.clone(),
+                        data: vec!["flight".to_string()],
+                        ttl: 300,
+                    },
+                    _ => unreachable!("unexpected query type"),
+                };
+                let response = make_response(message.header.id, &question.qname, record);
+                udp.send_to(&response, peer).await.unwrap();
+                if current + 1 >= EXPECTED_REQUESTS {
+                    break;
+                }
+            }
         })
     };
 
@@ -356,7 +387,7 @@ async fn resolver_deduplicates_singleflight() {
     let result2 = task2.await.unwrap().unwrap();
     assert_eq!(result1.a_records[0].addr, Ipv4Addr::new(7, 7, 7, 7));
     assert_eq!(result2.a_records[0].addr, Ipv4Addr::new(7, 7, 7, 7));
-    assert_eq!(requests.load(Ordering::SeqCst), 1);
+    assert_eq!(requests.load(Ordering::SeqCst), EXPECTED_REQUESTS);
 
     udp_task.await.unwrap();
 }

@@ -1,0 +1,17 @@
+{
+  "service": {
+    "name": "{{ go_app_service_name }}",
+    "port": {{ go_app_service_port }},
+    "address": "{{ go_app_service_host }}",
+    "checks": [
+      {
+        "name": "{{ go_app_service_name }} readyz",
+        "http": "{{ 'https' if go_app_readyz_tls_enabled else 'http' }}://{{ go_app_service_host }}:{{ go_app_service_port }}{{ go_app_readyz_path }}",
+        "interval": "{{ go_app_readyz_interval }}",
+        "timeout": "{{ go_app_readyz_timeout }}"{% if go_app_readyz_tls_enabled %},
+        "tls_skip_verify": {{ 'true' if go_app_readyz_skip_verify else 'false' }}{% endif %},
+        "method": "GET"
+      }
+    ]
+  }
+}

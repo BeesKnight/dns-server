@@ -1,14 +1,18 @@
 use std::{collections::HashMap, env, net::SocketAddr, sync::Arc, time::Duration};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use dns_agent::{
-    control_plane::{ControlPlaneClient, HttpControlPlaneTransport, RegisterRequest, TaskKind},
+    control_plane::{
+        AgentBootstrap, ControlPlaneClient, ControlPlaneTransport, HttpControlPlaneTransport,
+        RegisterRequest, TaskKind,
+    },
+    runtime::TimerService,
     BytePacketBuf,
 };
 use tokio::{
     net::UdpSocket,
     sync::{mpsc, Semaphore},
-    time::{interval, sleep, timeout, Instant, MissedTickBehavior},
+    time::{interval, timeout, Instant, MissedTickBehavior},
 };
 use tracing::{debug, info, warn};
 
@@ -53,6 +57,35 @@ impl ProxyConfig {
     }
 }
 
+fn bootstrap_from_env() -> Result<Option<AgentBootstrap>> {
+    let agent_id = match env::var("AGENT_ID") {
+        Ok(value) => Some(value.parse::<u64>().context("invalid AGENT_ID")?),
+        Err(env::VarError::NotPresent) => None,
+        Err(env::VarError::NotUnicode(_)) => {
+            return Err(anyhow!("AGENT_ID must be valid unicode"));
+        }
+    };
+
+    let auth_token = match env::var("AGENT_AUTH_TOKEN") {
+        Ok(value) => Some(value),
+        Err(env::VarError::NotPresent) => None,
+        Err(env::VarError::NotUnicode(_)) => {
+            return Err(anyhow!("AGENT_AUTH_TOKEN must be valid unicode"));
+        }
+    };
+
+    match (agent_id, auth_token) {
+        (Some(agent_id), Some(auth_token)) => Ok(Some(AgentBootstrap {
+            agent_id,
+            auth_token,
+        })),
+        (None, None) => Ok(None),
+        _ => Err(anyhow!(
+            "AGENT_ID and AGENT_AUTH_TOKEN must both be set when bootstrapping"
+        )),
+    }
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -62,6 +95,7 @@ async fn main() -> Result<()> {
         .init();
 
     let config = ProxyConfig::from_env()?;
+    let timer = TimerService::new();
     info!(?config, "starting DNS proxy");
 
     let listener = Arc::new(
@@ -73,16 +107,23 @@ async fn main() -> Result<()> {
     let concurrency_limit = Arc::new(Semaphore::new(config.max_inflight_requests));
 
     if let Ok(base_url) = env::var("AGENT_CONTROL_PLANE") {
+        let bootstrap = bootstrap_from_env()?;
         match HttpControlPlaneTransport::new(&base_url) {
             Ok(transport) => {
-                let client = ControlPlaneClient::new(transport);
+                if let Some(ref credentials) = bootstrap {
+                    transport.set_auth_headers(
+                        credentials.agent_id.to_string(),
+                        credentials.auth_token.clone(),
+                    );
+                }
+                let client = ControlPlaneClient::with_bootstrap(transport, bootstrap.clone());
                 let (batch_tx, mut batch_rx) = mpsc::channel::<Vec<u64>>(32);
                 tokio::spawn(async move {
                     while let Some(batch) = batch_rx.recv().await {
                         info!(leases = batch.len(), "dispatcher received batch");
                     }
                 });
-                tokio::spawn(run_control_plane(client, batch_tx));
+                tokio::spawn(run_control_plane(client, batch_tx, timer.clone()));
             }
             Err(err) => {
                 warn!(error = %err, "failed to initialize control plane client");
@@ -188,11 +229,20 @@ async fn handle_request(
     Ok(())
 }
 
-async fn run_control_plane<T>(client: ControlPlaneClient<T>, batch_tx: mpsc::Sender<Vec<u64>>)
-where
+async fn run_control_plane<T>(
+    client: ControlPlaneClient<T>,
+    batch_tx: mpsc::Sender<Vec<u64>>,
+    timer: TimerService,
+) where
     T: dns_agent::control_plane::ControlPlaneTransport + 'static,
 {
-    if let Err(err) = client
+    let snapshot = client.snapshot().await;
+    if let Some(agent_id) = snapshot.agent_id {
+        info!(
+            agent_id,
+            "restored control plane session from bootstrap state"
+        );
+    } else if let Err(err) = client
         .register(RegisterRequest {
             hostname: hostname::get()
                 .ok()
@@ -242,7 +292,9 @@ where
         match client.claim(&capacities).await {
             Ok(batch) => {
                 if batch.leases.is_empty() {
-                    sleep(Duration::from_millis(250)).await;
+                    if timer.sleep(Duration::from_millis(250)).await.is_err() {
+                        break;
+                    }
                     continue;
                 }
                 let lease_ids: Vec<u64> = batch.leases.iter().map(|lease| lease.lease_id).collect();
@@ -252,7 +304,9 @@ where
             }
             Err(err) => {
                 warn!(error = %err, "claim loop failed");
-                sleep(Duration::from_secs(1)).await;
+                if timer.sleep(Duration::from_secs(1)).await.is_err() {
+                    break;
+                }
             }
         }
     }

@@ -1,0 +1,4 @@
+skip_list:
+  - name
+  - var-naming
+  - role-name

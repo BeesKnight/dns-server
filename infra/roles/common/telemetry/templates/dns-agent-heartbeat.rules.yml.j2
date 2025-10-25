@@ -1,0 +1,14 @@
+# Managed by Ansible - Prometheus alert rules for DNS agent heartbeats
+groups:
+  - name: dns-agent-heartbeat
+    rules:
+      - alert: DNSAgentHeartbeatMissing
+        expr: jobs_agent_heartbeat_lag_seconds > {{ telemetry_jobs_heartbeat_threshold_seconds }}
+        for: {{ telemetry_alert_for }}
+        labels:
+          severity: {{ telemetry_alert_severity }}
+        annotations:
+          summary: "DNS agent heartbeat missing"
+          description: |
+            Agent heartbeat lag exceeded {{ telemetry_jobs_heartbeat_threshold_seconds }} seconds.
+            Investigate the jobs-svc leases/agents tables for stalled agents or stuck map events.

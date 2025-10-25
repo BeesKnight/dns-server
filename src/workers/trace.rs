@@ -19,6 +19,7 @@ use tracing::{debug, info, warn};
 
 use crate::control_plane::{Observation, TaskSpec};
 use crate::dispatcher::LeaseAssignment;
+use crate::runtime::SocketConfigurator;
 
 use super::{WorkerHandler, WorkerReport};
 
@@ -38,6 +39,7 @@ pub struct TraceWorker {
     engine: Arc<dyn TraceEngine>,
     limiter: Arc<TraceRateLimiter>,
     capability: Arc<dyn RawSocketCapability>,
+    configurator: SocketConfigurator,
 }
 
 impl TraceWorker {
@@ -45,19 +47,23 @@ impl TraceWorker {
         engine: Arc<dyn TraceEngine>,
         limiter: Arc<TraceRateLimiter>,
         capability: Arc<dyn RawSocketCapability>,
+        configurator: SocketConfigurator,
     ) -> Self {
         Self {
             engine,
             limiter,
             capability,
+            configurator,
         }
     }
 
     pub fn with_engine(engine: Arc<dyn TraceEngine>) -> Self {
+        let configurator = SocketConfigurator::default();
         Self::new(
             engine,
             Arc::new(TraceRateLimiter::new(DEFAULT_RATE_PER_SECOND)),
-            Arc::new(SystemRawSocketCapability::default()),
+            Arc::new(SystemRawSocketCapability::new(configurator.clone())),
+            configurator,
         )
     }
 
@@ -65,11 +71,13 @@ impl TraceWorker {
         engine: Arc<dyn TraceEngine>,
         rate_per_second: usize,
         capability: Arc<dyn RawSocketCapability>,
+        configurator: SocketConfigurator,
     ) -> Self {
         Self::new(
             engine,
             Arc::new(TraceRateLimiter::new(rate_per_second)),
             capability,
+            configurator,
         )
     }
 }
@@ -174,7 +182,10 @@ impl WorkerHandler for TraceWorker {
                 };
                 sequence = sequence.wrapping_add(1);
                 protocols_used.push(protocol);
-                let outcome = self.engine.probe(request, token.clone()).await;
+                let outcome = self
+                    .engine
+                    .probe(request, token.clone(), self.configurator.clone())
+                    .await;
                 permit.release_after(guard.interval());
 
                 match outcome {
@@ -357,6 +368,7 @@ pub trait TraceEngine: Send + Sync {
         &self,
         request: TraceProbeRequest,
         cancel: CancellationToken,
+        configurator: SocketConfigurator,
     ) -> TraceProbeOutcome;
 }
 
@@ -369,6 +381,7 @@ impl TraceEngine for SystemTraceEngine {
         &self,
         request: TraceProbeRequest,
         cancel: CancellationToken,
+        _configurator: SocketConfigurator,
     ) -> TraceProbeOutcome {
         if cancel.is_cancelled() {
             return TraceProbeOutcome::Error {
@@ -389,12 +402,25 @@ pub trait RawSocketCapability: Send + Sync {
     fn can_use_raw(&self) -> std::io::Result<bool>;
 }
 
-#[derive(Default)]
-struct SystemRawSocketCapability;
+struct SystemRawSocketCapability {
+    configurator: SocketConfigurator,
+}
+
+impl SystemRawSocketCapability {
+    fn new(configurator: SocketConfigurator) -> Self {
+        Self { configurator }
+    }
+}
+
+impl Default for SystemRawSocketCapability {
+    fn default() -> Self {
+        Self::new(SocketConfigurator::default())
+    }
+}
 
 impl RawSocketCapability for SystemRawSocketCapability {
     fn can_use_raw(&self) -> std::io::Result<bool> {
-        check_raw_socket_capability()
+        check_raw_socket_capability(&self.configurator)
     }
 }
 
@@ -522,12 +548,15 @@ fn resolution_failure_observation(host: &str, error: String) -> Observation {
     }
 }
 
-fn check_raw_socket_capability() -> std::io::Result<bool> {
+fn check_raw_socket_capability(configurator: &SocketConfigurator) -> std::io::Result<bool> {
     #[cfg(unix)]
     {
         use socket2::{Domain, Protocol, Socket, Type};
         match Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4)) {
-            Ok(_) => Ok(true),
+            Ok(socket) => {
+                configurator.configure_raw_socket(&socket);
+                Ok(true)
+            }
             Err(err) => {
                 if err.kind() == std::io::ErrorKind::PermissionDenied {
                     Ok(false)

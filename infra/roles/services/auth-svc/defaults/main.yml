@@ -1,0 +1,7 @@
+---
+# Default configuration for the auth service wrapper role
+
+go_app_service_name: auth-svc
+go_app_binary_name: "{{ go_app_service_name }}"
+go_app_src_dir: "/srv/aezacheck/{{ go_app_service_name }}"
+go_app_systemd_unit: "{{ go_app_service_name }}.service"

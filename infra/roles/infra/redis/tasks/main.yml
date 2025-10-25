@@ -1,0 +1,36 @@
+---
+- name: Install Redis packages
+  become: true
+  ansible.builtin.package:
+    name: "{{ redis_packages }}"
+    state: present
+
+- name: Ensure Redis data directory exists
+  become: true
+  ansible.builtin.file:
+    path: "{{ redis_data_dir }}"
+    state: directory
+    owner: redis
+    group: redis
+    mode: '0750'
+
+- name: Deploy redis.conf
+  become: true
+  ansible.builtin.template:
+    src: redis.conf.j2
+    dest: "{{ redis_conf_path }}"
+    owner: redis
+    group: redis
+    mode: '0640'
+  notify:
+    - restart redis
+    - redis healthcheck
+
+- name: Ensure Redis service is enabled and started
+  become: true
+  ansible.builtin.service:
+    name: "{{ redis_service_name }}"
+    state: started
+    enabled: true
+  notify:
+    - redis healthcheck

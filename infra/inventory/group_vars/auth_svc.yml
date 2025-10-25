@@ -1,0 +1,23 @@
+---
+# Variables specific to the auth-svc deployment
+
+go_app_service_name: auth-svc
+go_app_src_dir: /srv/aezacheck/auth-svc
+go_app_binary_name: auth-svc
+go_app_env_map:
+  APP_URL: https://auth.aezacheck.internal
+  JWT_SECRET: "changeme-auth"
+  REDIS_URL: redis://redis:6379/0
+  GEOIP_ENDPOINT: https://geoip.aezacheck.internal
+  LOG_LEVEL: info
+go_app_exec_args:
+  - serve
+  - --config
+  - "{{ go_app_config_path }}"
+go_app_migrate_command: "{{ go_app_release_dir }}/{{ go_app_binary_name }} migrate --config {{ go_app_config_path }}"
+go_app_memory_limit: 512M
+go_app_cpu_quota: 80%
+go_app_database_name: auth_db
+go_app_pg_owner: postgres
+go_app_systemd_extra:
+  Environment: SERVICE_NAME=auth-svc

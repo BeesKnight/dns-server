@@ -1,0 +1,24 @@
+---
+# Variables specific to the sites-svc deployment
+
+go_app_service_name: sites-svc
+go_app_src_dir: /srv/aezacheck/sites-svc
+go_app_binary_name: sites-svc
+go_app_env_map:
+  APP_URL: https://sites.aezacheck.internal
+  JWT_SECRET: "changeme-sites"
+  REDIS_URL: redis://redis:6379/1
+  GEOIP_ENDPOINT: https://geoip.aezacheck.internal
+  CACHE_TTL: "300"
+  STREAM_TASKS: "{{ STREAM_TASKS }}"
+go_app_exec_args:
+  - serve
+  - --config
+  - "{{ go_app_config_path }}"
+go_app_migrate_command: "{{ go_app_release_dir }}/{{ go_app_binary_name }} migrate --config {{ go_app_config_path }}"
+go_app_memory_limit: 768M
+go_app_cpu_quota: 90%
+go_app_database_name: sites_db
+go_app_pg_owner: postgres
+go_app_systemd_extra:
+  Environment: SERVICE_NAME=sites-svc

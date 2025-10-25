@@ -1,0 +1,99 @@
+---
+- name: Ensure promtail dependencies are present
+  ansible.builtin.package:
+    name: "{{ telemetry_promtail_package }}"
+    state: present
+  when: telemetry_enable_promtail
+
+- name: Ensure promtail directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ telemetry_promtail_user }}"
+    group: "{{ telemetry_promtail_group }}"
+    mode: "0755"
+  loop:
+    - "{{ telemetry_promtail_config_dir }}"
+    - "{{ telemetry_promtail_positions_dir }}"
+  when: telemetry_enable_promtail
+
+- name: Render promtail configuration
+  ansible.builtin.template:
+    src: promtail-config.yml.j2
+    dest: "{{ telemetry_promtail_config_path }}"
+    owner: "{{ telemetry_promtail_user }}"
+    group: "{{ telemetry_promtail_group }}"
+    mode: "0640"
+  when: telemetry_enable_promtail
+  notify: restart promtail
+
+- name: Ensure promtail service is enabled
+  ansible.builtin.systemd:
+    name: "{{ telemetry_promtail_service }}"
+    state: started
+    enabled: true
+  when: telemetry_enable_promtail
+
+- name: Install telemetry helper packages
+  ansible.builtin.package:
+    name:
+      - bc
+      - redis-tools
+      - postgresql-client
+    state: present
+  when: telemetry_enable_metrics_exporter
+
+- name: Ensure metrics textfile directory exists
+  ansible.builtin.file:
+    path: "{{ telemetry_metrics_textfile_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: telemetry_enable_metrics_exporter
+
+- name: Install observability metrics exporter script
+  ansible.builtin.template:
+    src: dns-observability-metrics.sh.j2
+    dest: "{{ telemetry_metrics_script_path }}"
+    owner: root
+    group: root
+    mode: "0750"
+  when: telemetry_enable_metrics_exporter
+
+- name: Install metrics exporter service
+  ansible.builtin.template:
+    src: dns-observability-metrics.service.j2
+    dest: "/etc/systemd/system/{{ telemetry_metrics_service }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: telemetry_enable_metrics_exporter
+  notify: reload systemd
+
+- name: Install metrics exporter timer
+  ansible.builtin.template:
+    src: dns-observability-metrics.timer.j2
+    dest: "/etc/systemd/system/{{ telemetry_metrics_timer }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: telemetry_enable_metrics_exporter
+  notify: reload systemd
+
+- name: Ensure metrics exporter timer is active
+  ansible.builtin.systemd:
+    name: "{{ telemetry_metrics_timer }}"
+    state: started
+    enabled: true
+  when: telemetry_enable_metrics_exporter
+
+- name: Install heartbeat alerting rules
+  ansible.builtin.template:
+    src: dns-agent-heartbeat.rules.yml.j2
+    dest: "{{ telemetry_prometheus_rules_dir }}/{{ telemetry_alert_rule_filename }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: telemetry_enable_alerts
+  notify: reload prometheus

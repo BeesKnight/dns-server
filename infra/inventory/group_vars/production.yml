@@ -1,0 +1,10 @@
+---
+agent_max_inflight: 8192
+agent_dns_upstream_timeout_ms: 1500
+telemetry_loki_endpoint: https://loki.prod.example.com/loki/api/v1/push
+telemetry_metrics_redis_url: redis://redis-prod:6379/0
+telemetry_metrics_redis_queue: agent:dispatch:prod
+telemetry_jobs_database_dsn: "host=postgres-prod dbname=jobs user=jobs password={{ vault_jobs_db_password_prod | default('jobs-prod') }}"
+telemetry_enable_alerts: true
+telemetry_jobs_heartbeat_threshold_seconds: 120
+telemetry_prometheus_rules_dir: /etc/prometheus/rules.d/production

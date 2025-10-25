@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -40,6 +40,7 @@ pub struct RegisterResponse {
     pub agent_id: u64,
     pub lease_duration_ms: u64,
     pub heartbeat_timeout_ms: u64,
+    pub auth_token: String,
 }
 
 /// Heartbeat acknowledgement used to refresh the heartbeat deadline.
@@ -223,6 +224,7 @@ pub trait ControlPlaneTransport: Send + Sync {
     async fn claim(&self, request: &ClaimRequest) -> Result<ClaimResponse, TransportError>;
     async fn extend(&self, request: &ExtendRequest) -> Result<Vec<ExtendOutcome>, TransportError>;
     async fn report(&self, request: &ReportRequest) -> Result<ReportResponse, TransportError>;
+    fn set_auth_headers(&self, _agent_id: String, _token: String) {}
 }
 
 /// HTTP transport that speaks JSON over REST to the control plane.
@@ -230,6 +232,7 @@ pub trait ControlPlaneTransport: Send + Sync {
 pub struct HttpControlPlaneTransport {
     client: reqwest::Client,
     base_url: reqwest::Url,
+    auth_headers: Arc<RwLock<Option<(String, String)>>>,
 }
 
 impl HttpControlPlaneTransport {
@@ -240,13 +243,28 @@ impl HttpControlPlaneTransport {
             .map_err(TransportError::network)?;
         let base_url = reqwest::Url::parse(base_url)
             .map_err(|err| TransportError::InvalidEndpoint(err.to_string()))?;
-        Ok(Self { client, base_url })
+        Ok(Self {
+            client,
+            base_url,
+            auth_headers: Arc::new(RwLock::new(None)),
+        })
     }
 
     fn endpoint(&self, path: &str) -> Result<reqwest::Url, TransportError> {
         self.base_url
             .join(path)
             .map_err(|err| TransportError::InvalidEndpoint(err.to_string()))
+    }
+
+    fn apply_auth_headers(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        if let Ok(guard) = self.auth_headers.read() {
+            if let Some((agent_id, token)) = guard.as_ref() {
+                return builder
+                    .header("X-Agent-Id", agent_id.clone())
+                    .header("X-Agent-Token", token.clone());
+            }
+        }
+        builder
     }
 }
 
@@ -258,8 +276,7 @@ impl ControlPlaneTransport for HttpControlPlaneTransport {
     ) -> Result<RegisterResponse, TransportError> {
         let url = self.endpoint("register")?;
         let response = self
-            .client
-            .post(url)
+            .apply_auth_headers(self.client.post(url))
             .json(request)
             .send()
             .await
@@ -278,8 +295,7 @@ impl ControlPlaneTransport for HttpControlPlaneTransport {
     ) -> Result<HeartbeatResponse, TransportError> {
         let url = self.endpoint("heartbeat")?;
         let response = self
-            .client
-            .post(url)
+            .apply_auth_headers(self.client.post(url))
             .json(request)
             .send()
             .await
@@ -295,8 +311,7 @@ impl ControlPlaneTransport for HttpControlPlaneTransport {
     async fn claim(&self, request: &ClaimRequest) -> Result<ClaimResponse, TransportError> {
         let url = self.endpoint("claim")?;
         let response = self
-            .client
-            .post(url)
+            .apply_auth_headers(self.client.post(url))
             .json(request)
             .send()
             .await
@@ -312,8 +327,7 @@ impl ControlPlaneTransport for HttpControlPlaneTransport {
     async fn extend(&self, request: &ExtendRequest) -> Result<Vec<ExtendOutcome>, TransportError> {
         let url = self.endpoint("extend")?;
         let response = self
-            .client
-            .post(url)
+            .apply_auth_headers(self.client.post(url))
             .json(request)
             .send()
             .await
@@ -329,8 +343,7 @@ impl ControlPlaneTransport for HttpControlPlaneTransport {
     async fn report(&self, request: &ReportRequest) -> Result<ReportResponse, TransportError> {
         let url = self.endpoint("report")?;
         let response = self
-            .client
-            .post(url)
+            .apply_auth_headers(self.client.post(url))
             .json(request)
             .send()
             .await
@@ -341,6 +354,12 @@ impl ControlPlaneTransport for HttpControlPlaneTransport {
             });
         }
         response.json().await.map_err(TransportError::network)
+    }
+
+    fn set_auth_headers(&self, agent_id: String, token: String) {
+        if let Ok(mut guard) = self.auth_headers.write() {
+            *guard = Some((agent_id, token));
+        }
     }
 }
 
@@ -393,6 +412,12 @@ impl Default for BackoffPolicy {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct AgentBootstrap {
+    pub agent_id: u64,
+    pub auth_token: String,
+}
+
 #[derive(Debug)]
 struct AgentRuntime {
     lifecycle: Lifecycle,
@@ -402,6 +427,7 @@ struct AgentRuntime {
     lease_duration: Duration,
     heartbeat_timeout: Duration,
     attempts: HashMap<AgentOperation, u32>,
+    auth_token: Option<String>,
 }
 
 impl AgentRuntime {
@@ -414,7 +440,18 @@ impl AgentRuntime {
             lease_duration: Duration::from_millis(0),
             heartbeat_timeout: Duration::from_millis(0),
             attempts: HashMap::new(),
+            auth_token: None,
         }
+    }
+
+    fn with_bootstrap(bootstrap: Option<AgentBootstrap>) -> Self {
+        let mut runtime = Self::new();
+        if let Some(bootstrap) = bootstrap {
+            runtime.lifecycle = Lifecycle::Active;
+            runtime.agent_id = Some(bootstrap.agent_id);
+            runtime.auth_token = Some(bootstrap.auth_token);
+        }
+        runtime
     }
 
     fn agent_id(&self) -> Result<u64, ControlPlaneError> {
@@ -441,6 +478,7 @@ impl AgentRuntime {
         self.heartbeat_timeout = Duration::from_millis(response.heartbeat_timeout_ms);
         self.heartbeat_deadline = Some(Instant::now() + self.heartbeat_timeout);
         self.lifecycle = Lifecycle::Active;
+        self.auth_token = Some(response.auth_token.clone());
         Ok(())
     }
 
@@ -492,11 +530,11 @@ struct ControlPlaneInner<T: ControlPlaneTransport> {
 }
 
 impl<T: ControlPlaneTransport> ControlPlaneInner<T> {
-    fn new(transport: T, policy: BackoffPolicy) -> Self {
+    fn new(transport: T, policy: BackoffPolicy, bootstrap: Option<AgentBootstrap>) -> Self {
         Self {
             transport,
             policy,
-            runtime: Mutex::new(AgentRuntime::new()),
+            runtime: Mutex::new(AgentRuntime::with_bootstrap(bootstrap)),
         }
     }
 }
@@ -515,11 +553,23 @@ impl<T: ControlPlaneTransport> Clone for ControlPlaneClient<T> {
 
 impl<T: ControlPlaneTransport> ControlPlaneClient<T> {
     pub fn new(transport: T) -> Self {
-        Self::with_policy(transport, BackoffPolicy::default())
+        Self::with_policy_and_bootstrap(transport, BackoffPolicy::default(), None)
     }
 
     pub fn with_policy(transport: T, policy: BackoffPolicy) -> Self {
-        let inner = ControlPlaneInner::new(transport, policy);
+        Self::with_policy_and_bootstrap(transport, policy, None)
+    }
+
+    pub fn with_bootstrap(transport: T, bootstrap: Option<AgentBootstrap>) -> Self {
+        Self::with_policy_and_bootstrap(transport, BackoffPolicy::default(), bootstrap)
+    }
+
+    pub fn with_policy_and_bootstrap(
+        transport: T,
+        policy: BackoffPolicy,
+        bootstrap: Option<AgentBootstrap>,
+    ) -> Self {
+        let inner = ControlPlaneInner::new(transport, policy, bootstrap);
         Self {
             inner: Arc::new(inner),
         }
@@ -533,9 +583,14 @@ impl<T: ControlPlaneTransport> ControlPlaneClient<T> {
             let response = self.inner.transport.register(&request).await;
             match response {
                 Ok(payload) => {
-                    let mut runtime = self.inner.runtime.lock().await;
-                    runtime.apply_registration(&payload)?;
-                    runtime.record_success(AgentOperation::Register);
+                    {
+                        let mut runtime = self.inner.runtime.lock().await;
+                        runtime.apply_registration(&payload)?;
+                        runtime.record_success(AgentOperation::Register);
+                    }
+                    self.inner
+                        .transport
+                        .set_auth_headers(payload.agent_id.to_string(), payload.auth_token.clone());
                     return Ok(payload);
                 }
                 Err(err) => {
@@ -689,6 +744,7 @@ pub struct AgentSnapshot {
     pub agent_id: Option<u64>,
     pub heartbeat_deadline: Option<Instant>,
     pub leases: HashMap<u64, Instant>,
+    pub auth_token: Option<String>,
 }
 
 impl<T: ControlPlaneTransport> ControlPlaneClient<T> {
@@ -698,6 +754,7 @@ impl<T: ControlPlaneTransport> ControlPlaneClient<T> {
             agent_id: runtime.agent_id,
             heartbeat_deadline: runtime.heartbeat_deadline,
             leases: runtime.lease_deadlines.clone(),
+            auth_token: runtime.auth_token.clone(),
         }
     }
 }
@@ -717,7 +774,9 @@ mod tests {
         };
         let json = serde_json::to_value(&request).expect("serialize claim");
         assert_eq!(json["agent_id"], 7);
-        let caps = json["capacities"].as_object().unwrap();
+        let caps = json["capacities"]
+            .as_object()
+            .expect("serialized capacities should be an object");
         assert_eq!(caps["dns"], 4);
         assert_eq!(caps["http"], 2);
     }

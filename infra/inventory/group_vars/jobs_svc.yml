@@ -7,11 +7,17 @@ go_app_binary_name: jobs-svc
 jobs_claim_block_ms: 20000
 jobs_lease_ttl: 90s
 jobs_default_max_parallel: 4
+
+# MaxMind license key is expected to be provided via environment when running Ansible.
+geoip_maxmind_license_key: "{{ lookup('env', 'MAXMIND_LICENSE_KEY') | default('', true) }}"
 go_app_env_map:
   APP_URL: https://jobs.aezacheck.internal
   JWT_SECRET: "changeme-jobs"
   REDIS_URL: redis://redis:6379/2
   GEOIP_ENDPOINT: https://geoip.aezacheck.internal
+  GEOIP_DISABLED: "false"
+  GEOIP_CITY_PATH: "{{ geoip_data_dir }}/GeoLite2-City.mmdb"
+  GEOIP_ASN_PATH: "{{ geoip_data_dir }}/GeoLite2-ASN.mmdb"
   QUEUE_NAME: default
   STREAM_TASKS: "{{ STREAM_TASKS }}"
   CLAIM_BLOCK_MS: "{{ jobs_claim_block_ms }}"

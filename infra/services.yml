@@ -15,6 +15,7 @@
   hosts: jobs_svc
   become: true
   roles:
+    - geoip
     - services/go_app
 
 - name: Deploy API gateway

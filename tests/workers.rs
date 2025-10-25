@@ -1,6 +1,7 @@
 mod support;
 
 use std::collections::VecDeque;
+use std::io;
 use std::net::SocketAddr;
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -19,7 +20,9 @@ use dns_agent::control_plane::{
 use dns_agent::dispatcher::{spawn_dispatcher, DispatcherConfig, LeaseAssignment};
 use dns_agent::workers::{
     spawn_worker_pools, PingEngine, PingProbeOutcome, PingProtocol, PingRequest, PingWorker,
-    ReportSink, TcpWorker, WorkerHandler, WorkerHandlers, WorkerPoolsConfig, WorkerReport,
+    RawSocketCapability, ReportSink, TcpWorker, TraceEngine, TraceObservation, TraceProbeOutcome,
+    TraceProbeRequest, TraceStatus, TraceWorker, WorkerHandler, WorkerHandlers, WorkerPoolsConfig,
+    WorkerReport,
 };
 use serde_json::json;
 use tokio::net::TcpListener;
@@ -34,6 +37,19 @@ fn make_assignment(id: u64, kind: TaskKind) -> (LeaseAssignment, CancellationTok
         kind,
         lease_until_ms: 0,
         spec: dummy_spec(kind, id),
+    };
+    let token = CancellationToken::new();
+    let assignment = LeaseAssignment::new(lease, token.clone());
+    (assignment, token)
+}
+
+fn make_trace_assignment(id: u64, spec: TraceSpec) -> (LeaseAssignment, CancellationToken) {
+    let lease = Lease {
+        lease_id: id,
+        task_id: id,
+        kind: TaskKind::Trace,
+        lease_until_ms: 0,
+        spec: TaskSpec::Trace(spec),
     };
     let token = CancellationToken::new();
     let assignment = LeaseAssignment::new(lease, token.clone());
@@ -250,6 +266,185 @@ worker_test!(tcp_worker_happy_eyeballs_fallback, {
     );
     accept.await.expect("listener task completes");
 });
+
+worker_test!(trace_worker_collects_observation, {
+    let engine = Arc::new(MockTraceEngine::with_responses(vec![
+        TraceProbeOutcome::Hop {
+            address: Some(SocketAddr::from(([10, 0, 0, 1], 33434))),
+            rtt: Some(Duration::from_millis(20)),
+            reached: false,
+        },
+        TraceProbeOutcome::Timeout,
+        TraceProbeOutcome::Hop {
+            address: Some(SocketAddr::from(([10, 0, 0, 5], 33434))),
+            rtt: Some(Duration::from_millis(35)),
+            reached: true,
+        },
+    ]));
+    let capability: Arc<dyn RawSocketCapability> = Arc::new(MockCapability::ok(true));
+    let worker = TraceWorker::with_engine_and_config(engine, 64, capability);
+
+    let (assignment, _) = make_trace_assignment(
+        42,
+        TraceSpec {
+            host: "127.0.0.1".into(),
+            max_hops: Some(4),
+        },
+    );
+
+    let report = worker.handle(assignment).await.expect("trace report");
+    let (completed, cancelled) = report.into_parts();
+    assert!(cancelled.is_empty());
+    assert_eq!(completed.len(), 1);
+    let observation = completed[0]
+        .observations
+        .iter()
+        .find(|obs| obs.name == "trace")
+        .expect("trace observation");
+    let parsed: TraceObservation = serde_json::from_value(observation.value.clone()).unwrap();
+    assert_eq!(parsed.status, TraceStatus::Ok);
+    assert_eq!(parsed.hops.len(), 2);
+    assert!(parsed.hops[0].success);
+    assert!(parsed.hops[1].reached_destination);
+    assert!(!parsed.nat_detected);
+    assert!(!parsed.loop_detected);
+    assert!(!parsed.permission_denied);
+});
+
+worker_test!(trace_worker_respects_rate_limits, {
+    let engine = Arc::new(MockTraceEngine::with_responses(vec![
+        TraceProbeOutcome::Timeout,
+        TraceProbeOutcome::Timeout,
+        TraceProbeOutcome::Hop {
+            address: Some(SocketAddr::from(([192, 0, 2, 1], 33434))),
+            rtt: Some(Duration::from_millis(10)),
+            reached: true,
+        },
+    ]));
+    let capability: Arc<dyn RawSocketCapability> = Arc::new(MockCapability::ok(true));
+    let worker = TraceWorker::with_engine_and_config(engine, 2, capability);
+
+    let (assignment, _) = make_trace_assignment(
+        99,
+        TraceSpec {
+            host: "127.0.0.1".into(),
+            max_hops: Some(1),
+        },
+    );
+
+    let start = Instant::now();
+    let report = worker.handle(assignment).await.expect("trace report");
+    let elapsed = start.elapsed();
+    let (completed, _) = report.into_parts();
+    assert_eq!(completed.len(), 1);
+    assert!(
+        elapsed >= Duration::from_millis(450),
+        "elapsed {:?} shorter than rate limit",
+        elapsed
+    );
+});
+
+worker_test!(trace_worker_marks_permission_denied, {
+    let engine = Arc::new(MockTraceEngine::with_responses(
+        vec![TraceProbeOutcome::Timeout; 3],
+    ));
+    let capability: Arc<dyn RawSocketCapability> = Arc::new(MockCapability::ok(false));
+    let worker = TraceWorker::with_engine_and_config(engine, 10, capability);
+
+    let (assignment, _) = make_trace_assignment(
+        55,
+        TraceSpec {
+            host: "127.0.0.1".into(),
+            max_hops: Some(1),
+        },
+    );
+
+    let report = worker.handle(assignment).await.expect("trace report");
+    let (completed, _) = report.into_parts();
+    let observation = completed[0]
+        .observations
+        .iter()
+        .find(|obs| obs.name == "trace")
+        .expect("trace observation");
+    let parsed: TraceObservation = serde_json::from_value(observation.value.clone()).unwrap();
+    assert_eq!(parsed.status, TraceStatus::PermissionDenied);
+    assert!(parsed.permission_denied);
+});
+
+#[derive(Debug)]
+struct MockTraceEngine {
+    responses: Arc<Mutex<VecDeque<TraceProbeOutcome>>>,
+    calls: Arc<Mutex<Vec<TraceProbeRequest>>>,
+}
+
+impl MockTraceEngine {
+    fn with_responses(responses: Vec<TraceProbeOutcome>) -> Self {
+        Self {
+            responses: Arc::new(Mutex::new(VecDeque::from(responses))),
+            calls: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    #[allow(dead_code)]
+    async fn calls(&self) -> Vec<TraceProbeRequest> {
+        self.calls.lock().await.clone()
+    }
+}
+
+impl Clone for MockTraceEngine {
+    fn clone(&self) -> Self {
+        Self {
+            responses: Arc::clone(&self.responses),
+            calls: Arc::clone(&self.calls),
+        }
+    }
+}
+
+#[async_trait]
+impl TraceEngine for MockTraceEngine {
+    async fn probe(
+        &self,
+        request: TraceProbeRequest,
+        cancel: CancellationToken,
+    ) -> TraceProbeOutcome {
+        if cancel.is_cancelled() {
+            return TraceProbeOutcome::Error {
+                error: "cancelled".into(),
+            };
+        }
+        self.calls.lock().await.push(request);
+        self.responses
+            .lock()
+            .await
+            .pop_front()
+            .unwrap_or(TraceProbeOutcome::Timeout)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct MockCapability {
+    result: Result<bool, io::ErrorKind>,
+}
+
+impl MockCapability {
+    fn ok(value: bool) -> Self {
+        Self { result: Ok(value) }
+    }
+
+    #[allow(dead_code)]
+    fn err(kind: io::ErrorKind) -> Self {
+        Self { result: Err(kind) }
+    }
+}
+
+impl RawSocketCapability for MockCapability {
+    fn can_use_raw(&self) -> std::io::Result<bool> {
+        match self.result {
+            Ok(value) => Ok(value),
+            Err(kind) => Err(std::io::Error::from(kind)),
+        }
+    }
+}
 
 worker_test!(ping_worker_produces_observations, {
     let engine: Arc<dyn PingEngine> = Arc::new(MockPingEngine::new(vec![

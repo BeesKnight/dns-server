@@ -45,9 +45,8 @@ worker_test!(batch_lease_protocol_is_respected, {
         counts.insert(kind, 10);
     }
     let tasks = build_tasks(&counts);
-    control.enqueue_many(tasks.clone()).await;
-
     let pipeline = AgentPipeline::spawn(backend.clone(), config.clone());
+    control.enqueue_many(tasks.clone()).await;
     pipeline
         .wait_for_total(tasks.len() as u64, Duration::from_secs(5))
         .await;
@@ -200,6 +199,33 @@ worker_test!(load_metrics_with_thousands_of_tasks, {
         stats.max_leases() <= 64 + (TaskType::ALL.len() as u64 * 8),
         "unexpected growth in active leases"
     );
+});
+
+worker_test!(trace_tasks_flow_through_pipeline, {
+    let (backend, control, driver) = MockBackend::new();
+
+    let mut config = AgentPipelineConfig::new(16);
+    config.per_type_concurrency.insert(TaskType::Trace, 2);
+    config
+        .processing_latency
+        .insert(TaskType::Trace, Duration::from_millis(40));
+
+    let mut counts = HashMap::new();
+    counts.insert(TaskType::Trace, 6);
+    let tasks = build_tasks(&counts);
+    control.enqueue_many(tasks.clone()).await;
+
+    let pipeline = AgentPipeline::spawn(backend.clone(), config.clone());
+    pipeline
+        .wait_for_total(tasks.len() as u64, Duration::from_secs(5))
+        .await;
+    let stats = pipeline.shutdown().await;
+    control.shutdown().await;
+    let _ = driver.await;
+
+    assert_eq!(stats.per_type_completed(TaskType::Trace), 6);
+    assert_eq!(stats.per_type_cancelled(TaskType::Trace), 0);
+    assert!(stats.peak_inflight(TaskType::Trace) <= 2);
 });
 
 use tokio::net::TcpListener;

@@ -24,6 +24,7 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 hostname = "0.3"
 metrics = "0.23"
 socket2 = { version = "0.5", features = ["all"] }
+rand = "0.8"
 
 [dev-dependencies]
 futures = "0.3"
@@ -31,7 +32,6 @@ hdrhistogram = "7"
 metrics = "0.23"
 metrics-util = "0.15"
 num_cpus = "1.16"
-rand = "0.8"
 
 [build-dependencies]
 num_cpus = "1.16"

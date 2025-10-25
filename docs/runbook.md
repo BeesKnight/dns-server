@@ -20,15 +20,22 @@
 ## .env и подготовка данных
 1. Скопируйте шаблон общих переменных (`.env.shared`) и сервисных `.env` файлов (auth/sites/jobs/api-gw). При необходимости создайте их из примеров или согласуйте значения с командой инфраструктуры.
 2. Заполните каталог `data/` файлами GeoLite2 (`GeoLite2-City.mmdb`, `GeoLite2-ASN.mmdb`). Docker-compose монтирует этот каталог в jobs-сервис; без данных часть функциональности проверок будет ограничена.【F:docker-compose.yml†L34-L52】【F:infra/roles/geoip/templates/geoip-update.sh.j2†L64-L65】
-3. Проверьте, что переменные из таблицы [docs/overview.md](./overview.md#переменные-окружения) заданы в `.env` или через окружение shell перед запуском агента.
+3. Для production jobs-сервиса используйте конфигурацию через переменные окружения (`HTTP_ADDR`, `DATABASE_URL`, `REDIS_ADDR`, `REDIS_PASSWORD`, `STREAM_TASKS`, `CLAIM_BLOCK_MS`, `LEASE_TTL`, `MAX_RETRIES`, `RETRY_BACKOFF`, `DEFAULT_MAX_PARALLEL`, `CACHE_TTL`, `PUB_PREFIX`, `MAP_*`, `GEOIP_*`). Эти значения считываются на старте `services/jobs-svc` и применяются ко всем зависимостям (HTTP, Postgres, Redis, GeoIP).【F:services/jobs-svc/main.go†L33-L80】【F:group_vars/jobs_svc.yml†L13-L35】
+4. Проверьте, что переменные из таблицы [docs/overview.md](./overview.md#переменные-окружения) заданы в `.env` или через окружение shell перед запуском агента.
 
 ## Запуск docker-compose стенда
-1. Выполните `docker compose up --build` из корня репозитория. Это соберёт образы `dev/*` и поднимет зависимости.
+1. Выполните `docker compose up --build` из корня репозитория. Это соберёт production-образ `services/jobs-svc` и остальные `dev/*` сервисы, после чего поднимет зависимости.
 2. Дождитесь healthchecks:
    - Postgres на порту `5432` (команда `pg_isready`).
    - Redis на порту `6379` (команда `redis-cli ping`).
    - API Gateway на порту `8088` с эндпоинтами `/livez` и `/readyz` (healthcheck curl).【F:docker-compose.yml†L3-L45】
-3. Сервисы приложений доступны на портах: auth `8080`, sites `8081`, jobs `8082`, api-gw `8088`. Убедитесь, что `.env.*` файлы содержат правильные строки подключения к Postgres/Redis.
+3. Сервисы приложений доступны на портах: auth `8080`, sites `8081`, jobs `8082`, api-gw `8088`. Убедитесь, что `.env.*` файлы содержат правильные строки подключения к Postgres/Redis; jobs-сервис проверяет готовность через `/livez` и `/readyz`, которые валидируют подключение к базе и Redis перед отдачей 200 OK.【F:services/jobs-svc/main.go†L154-L189】
+
+## Production jobs-сервис
+
+- Код сервиса размещён в `services/jobs-svc` и использует встроенные миграции (`services/jobs-svc/migrations/*.sql`). При запуске `initApp` автоматически применяет новые версии, записывая прогресс в таблицу `schema_migrations`. Это гарантирует развёртывание таблиц `agents`, `leases`, `checks`, `check_results` и индексов для быстрого поиска просроченных лизов.【F:services/jobs-svc/main.go†L190-L237】【F:services/jobs-svc/migrate.go†L11-L71】
+- HTTP-роуты `/v1/agents/register|heartbeat|claim|extend|report` соответствуют контрактам агента; ответы содержат дедлайны (`lease_duration_ms`, `next_deadline_ms`, `lease_until_ms`, `new_deadline_ms`) и возвращают коды ошибок через `http.Error` при нарушении контракта. Health-check'и `/livez` и `/readyz` всегда доступны и используются в Dockerfile/infra для проверки готовности.【F:services/jobs-svc/main.go†L86-L189】【F:services/jobs-svc/Dockerfile†L11-L18】
+- В production-плейбуках Ansible переменные окружения для сервиса описаны в `group_vars/jobs_svc.yml` и `infra/inventory/group_vars/jobs_svc.yml`. Роль `services/go_app` собирает бинарь командой `go build .`, разворачивает его в `/opt/aezacheck/jobs-svc` и запускает единый процесс без дополнительных CLI-команд миграции.【F:group_vars/jobs_svc.yml†L5-L35】【F:infra/inventory/group_vars/jobs_svc.yml†L5-L35】【F:infra/roles/services/go_app/tasks/main.yml†L1-L67】
 
 ## Запуск dns_agent
 1. Экспортируйте переменные окружения (можно через `.env.agent`). Минимальный набор: `AGENT_DNS_LISTEN`, `AGENT_DNS_UPSTREAM`, `AGENT_DNS_UPSTREAM_TIMEOUT_MS`, `AGENT_MAX_INFLIGHT`, а также `AGENT_CONTROL_PLANE`, `AGENT_ID`, `AGENT_AUTH_TOKEN`, если агент должен взаимодействовать с control plane.【F:src/main.rs†L27-L132】

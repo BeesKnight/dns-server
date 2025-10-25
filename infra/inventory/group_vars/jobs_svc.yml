@@ -1,0 +1,23 @@
+---
+# Variables specific to the jobs-svc deployment
+
+go_app_service_name: jobs-svc
+go_app_src_dir: /srv/aezacheck/jobs-svc
+go_app_binary_name: jobs-svc
+go_app_env_map:
+  APP_URL: https://jobs.aezacheck.internal
+  JWT_SECRET: "changeme-jobs"
+  REDIS_URL: redis://redis:6379/2
+  GEOIP_ENDPOINT: https://geoip.aezacheck.internal
+  QUEUE_NAME: default
+go_app_exec_args:
+  - serve
+  - --config
+  - "{{ go_app_config_path }}"
+go_app_migrate_command: "{{ go_app_release_dir }}/{{ go_app_binary_name }} migrate --config {{ go_app_config_path }}"
+go_app_memory_limit: 1G
+go_app_cpu_quota: 95%
+go_app_database_name: jobs_db
+go_app_pg_owner: postgres
+go_app_systemd_extra:
+  Environment: SERVICE_NAME=jobs-svc

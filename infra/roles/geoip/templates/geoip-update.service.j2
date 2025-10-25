@@ -1,0 +1,8 @@
+[Unit]
+Description=Update GeoLite2 databases
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart={{ geoip_update_script_path }}

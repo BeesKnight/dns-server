@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly GeoLite2 database refresh
+
+[Timer]
+OnCalendar={{ geoip_update_oncalendar }}
+Persistent=true
+RandomizedDelaySec={{ geoip_update_randomized_delay }}
+
+[Install]
+WantedBy=timers.target

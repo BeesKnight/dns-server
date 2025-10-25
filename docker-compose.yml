@@ -47,7 +47,7 @@ services:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
     volumes:
-      - ./data:/data           # GeoLite *.mmdb положишь сюда
+      - ./data:/opt/aezacheck/data           # GeoLite *.mmdb положишь сюда
     ports: ["8082:8082"]
 
   api-gw:

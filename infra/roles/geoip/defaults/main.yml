@@ -1,0 +1,18 @@
+---
+# Default configuration for GeoIP database management
+
+geoip_data_dir: "/opt/aezacheck/data"
+geoip_license_dir: "/etc/geoip"
+geoip_license_file: "{{ geoip_license_dir }}/license.key"
+geoip_maxmind_base_url: "https://download.maxmind.com/app/geoip_download"
+geoip_update_script_path: "/usr/local/bin/geoip-update.sh"
+geoip_update_service: "geoip-update.service"
+geoip_update_timer: "geoip-update.timer"
+geoip_update_oncalendar: "Mon *-*-* 03:00:00"
+geoip_update_randomized_delay: "2h"
+geoip_restart_service: "jobs-svc.service"
+geoip_required_packages:
+  - curl
+  - ca-certificates
+# License key must be provided by inventory or environment
+geoip_maxmind_license_key: ""

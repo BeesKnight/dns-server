@@ -114,8 +114,8 @@ func loadConfig() Config {
 		MapStreamMaxLen: ienv("MAP_STREAM_MAXLEN", 100000),
 
 		GeoIPDisabled: benv("GEOIP_DISABLED", false),
-		GeoIPCityPath: env("GEOIP_CITY_PATH", "/data/GeoLite2-City.mmdb"),
-		GeoIPASNPath:  env("GEOIP_ASN_PATH", ""),
+		GeoIPCityPath: env("GEOIP_CITY_PATH", "/opt/aezacheck/data/GeoLite2-City.mmdb"),
+		GeoIPASNPath:  env("GEOIP_ASN_PATH", "/opt/aezacheck/data/GeoLite2-ASN.mmdb"),
 	}
 }
 
@@ -901,32 +901,47 @@ type Geo struct {
 	City    string  `json:"city,omitempty"`
 	ASN     int     `json:"asn,omitempty"`
 }
+type cityDB interface {
+	City(net.IP) (*geoip2.City, error)
+	Close() error
+}
+
+type asnDB interface {
+	ASN(net.IP) (*geoip2.ASN, error)
+	Close() error
+}
+
 type geoIP struct {
-	city *geoip2.Reader
-	asn  *geoip2.Reader
+	city cityDB
+	asn  asnDB
 }
 
 func openGeo(cityPath, asnPath string) (*geoIP, error) {
 	g := &geoIP{}
-	var err error
 	if cityPath != "" {
-		if g.city, err = geoip2.Open(cityPath); err != nil {
+		reader, err := geoip2.Open(cityPath)
+		if err != nil {
 			return nil, err
 		}
+		g.city = reader
 	}
 	if asnPath != "" {
-		if g.asn, err = geoip2.Open(asnPath); err != nil {
-			// не критично
+		if reader, err := geoip2.Open(asnPath); err == nil {
+			g.asn = reader
 		}
 	}
 	return g, nil
 }
+
 func (g *geoIP) Close() {
+	if g == nil {
+		return
+	}
 	if g.city != nil {
-		g.city.Close()
+		_ = g.city.Close()
 	}
 	if g.asn != nil {
-		g.asn.Close()
+		_ = g.asn.Close()
 	}
 }
 

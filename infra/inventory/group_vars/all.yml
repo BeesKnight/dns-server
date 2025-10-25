@@ -12,3 +12,6 @@ REDIS_PASSWORD: root
 REDIS_ADDR: "{{ REDIS_HOST }}:{{ REDIS_PORT }}"
 
 STREAM_TASKS: check_tasks
+
+# Shared GeoIP configuration
+geoip_data_dir: /opt/aezacheck/data

@@ -392,17 +392,27 @@ export default function MapGlobe() {
   const labelResolution = useMemo(() => {
     const alt = camAltRef.current;
     if (performanceMode) {
-      if (alt < 0.7) return 0.32;
-      if (alt < 0.95) return 0.45;
-      if (alt < 1.25) return 0.6;
-      return 0.75;
+      if (alt < 0.68) return 0.18;
+      if (alt < 0.9) return 0.32;
+      if (alt < 1.2) return 0.48;
+      return 0.68;
     }
-    if (alt < 0.65) return 0.26;
-    if (alt < 0.8) return 0.34;
-    if (alt < 1) return 0.48;
-    if (alt < 1.25) return 0.62;
-    return 0.85;
+    if (alt < 0.6) return 0.14;
+    if (alt < 0.72) return 0.22;
+    if (alt < 0.85) return 0.32;
+    if (alt < 1.05) return 0.48;
+    if (alt < 1.35) return 0.64;
+    return 0.82;
   }, [performanceMode, tick]);
+
+  const labelAltitude = useMemo(() => {
+    const alt = camAltRef.current;
+    if (alt < 0.65) return 0.006;
+    if (alt < 0.85) return 0.01;
+    if (alt < 1.1) return 0.015;
+    if (alt < 1.45) return 0.02;
+    return 0.026;
+  }, [tick]);
 
   const visiblePolygons = useMemo(() => {
     if (!polygons.length) return polygons;
@@ -467,10 +477,10 @@ export default function MapGlobe() {
         labelsData={visibleLabels}
         labelLat={(d: CountryLabel) => d.lat}
         labelLng={(d: CountryLabel) => d.lng}
-        labelText={(d: CountryLabel) => d.name}
+        labelText={(d: CountryLabel) => d.name.toUpperCase()}
         labelSize={labelSize}
         labelColor={() => LABEL_COLOR}
-        labelAltitude={0.03}
+        labelAltitude={labelAltitude}
         labelResolution={labelResolution}
         labelIncludeDot={false}
 

@@ -69,6 +69,104 @@ func TestClaimRespJSONShape(t *testing.T) {
 	}
 }
 
+func TestHandleClaimDrainsBacklog(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("start miniredis: %v", err)
+	}
+	defer mr.Close()
+
+	ctx := context.Background()
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr(), Protocol: 2})
+	defer rdb.Close()
+
+	stream := "check_tasks"
+	taskID := uuid.New()
+	checkID := uuid.New()
+	spec := `{"query":"example.com"}`
+	msgID, err := rdb.XAdd(ctx, &redis.XAddArgs{
+		Stream: stream,
+		Values: map[string]any{
+			"task_id":  taskID.String(),
+			"check_id": checkID.String(),
+			"kind":     "dns",
+			"spec":     spec,
+		},
+	}).Result()
+	if err != nil {
+		t.Fatalf("xadd backlog: %v", err)
+	}
+
+	leaseID := uuid.New()
+	leaseExternalID := int64(99)
+	leaseDeadline := time.Now().Add(90 * time.Second).UTC()
+
+	fp := &fakePool{}
+	fp.queryRowFn = func(_ context.Context, query string, args ...any) pgx.Row {
+		switch {
+		case strings.Contains(query, "select count(1) from leases"):
+			return fakeRow{values: []any{int64(0)}}
+		case strings.Contains(query, "insert into leases"):
+			if len(args) < 7 {
+				return fakeRow{err: fmt.Errorf("unexpected args for insert: %d", len(args))}
+			}
+			if streamID, ok := args[5].(string); !ok || streamID != msgID {
+				return fakeRow{err: fmt.Errorf("unexpected stream id: %#v", args[5])}
+			}
+			return fakeRow{values: []any{leaseID, leaseExternalID, leaseDeadline}}
+		case strings.Contains(query, "select site_id::text, request_ip::text from checks where id=$1"):
+			return fakeRow{values: []any{sql.NullString{}, sql.NullString{}}}
+		default:
+			return fakeRow{err: fmt.Errorf("unexpected query: %s", query)}
+		}
+	}
+
+	app := &App{
+		cfg: Config{
+			StreamTasks:     stream,
+			ClaimBlockMs:    50,
+			LeaseTTL:        90 * time.Second,
+			MapPubChannel:   "map:events",
+			MapStream:       "map_events",
+			MapStreamMaxLen: 100,
+		},
+		log:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		pool:  fp,
+		redis: rdb,
+	}
+
+	ag := &agentAuth{ID: uuid.New(), ExternalID: 123, Limit: 1}
+	reqBody := strings.NewReader(fmt.Sprintf(`{"agent_id":%d,"capacities":{"dns":1}}`, ag.ExternalID))
+	req := httptest.NewRequest(http.MethodPost, "/v1/agents/claim", reqBody)
+	req = req.WithContext(context.WithValue(req.Context(), agentAuthKey{}, ag))
+
+	w := httptest.NewRecorder()
+	app.handleClaim(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp claimResp
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal claim resp: %v", err)
+	}
+	if len(resp.Leases) != 1 {
+		t.Fatalf("expected one lease, got %d", len(resp.Leases))
+	}
+	lease := resp.Leases[0]
+	if lease.LeaseID != uint64(leaseExternalID) {
+		t.Fatalf("unexpected lease id %d", lease.LeaseID)
+	}
+	if lease.TaskID != uuidToUint64(taskID) {
+		t.Fatalf("unexpected task id %d", lease.TaskID)
+	}
+
+	if ttl := mr.TTL(leaseKey(msgID)); ttl <= 0 {
+		t.Fatalf("expected lease lock to be set, ttl=%v", ttl)
+	}
+}
+
 func TestExtendRespJSONShape(t *testing.T) {
 	resp := extendResp{Outcomes: []extendOutcome{{LeaseID: 5, NewDeadlineMs: 12345}}}
 	raw, err := json.Marshal(resp)
@@ -579,6 +677,28 @@ func (r fakeRow) Scan(dest ...any) error {
 				return fmt.Errorf("value %d has type %T", i, r.values[i])
 			}
 			*ptr = v
+		case *int:
+			switch v := r.values[i].(type) {
+			case int:
+				*ptr = v
+			case int64:
+				*ptr = int(v)
+			case int32:
+				*ptr = int(v)
+			default:
+				return fmt.Errorf("value %d has type %T", i, r.values[i])
+			}
+		case *int64:
+			switch v := r.values[i].(type) {
+			case int64:
+				*ptr = v
+			case int:
+				*ptr = int64(v)
+			case int32:
+				*ptr = int64(v)
+			default:
+				return fmt.Errorf("value %d has type %T", i, r.values[i])
+			}
 		case *string:
 			v, ok := r.values[i].(string)
 			if !ok {

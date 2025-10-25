@@ -114,7 +114,7 @@
   become: true
   become_user: "{{ go_app_pg_owner }}"
   register: go_app_pgcrypto_result
-  changed_when: "CREATE EXTENSION" in go_app_pgcrypto_result.stdout
+  changed_when: '"CREATE EXTENSION" in go_app_pgcrypto_result.stdout'
   when: go_app_database_name is not none
 
 - name: Ensure Go application service is enabled and started

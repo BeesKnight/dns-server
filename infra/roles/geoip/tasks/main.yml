@@ -69,4 +69,4 @@
 - name: Run GeoIP update immediately
   ansible.builtin.command: "{{ geoip_update_script_path }}"
   register: geoip_update_run
-  changed_when: "GeoIP databases updated" in (geoip_update_run.stdout | default(''))
+  changed_when: '"GeoIP databases updated" in (geoip_update_run.stdout | default(''))'

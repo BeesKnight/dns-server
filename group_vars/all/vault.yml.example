@@ -1,0 +1,6 @@
+---
+# Example secrets file. Copy to vault.yml and encrypt with `ansible-vault encrypt`.
+vault_postgres_password: prod-postgres-password
+vault_redis_password: prod-redis-password
+vault_jwt_signing_key: prod-jwt-secret
+vault_jobs_maxmind_license_key: prod-maxmind-license

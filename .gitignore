@@ -103,3 +103,5 @@ pkg/
 # ignore edit files
 .*~
 .*.sw?
+# Ansible vault secrets
+group_vars/all/vault.yml

@@ -1,0 +1,46 @@
+name: Ansible orchestration
+
+on:
+  push:
+    paths:
+      - 'playbooks/**'
+      - 'inventories/**'
+      - 'group_vars/**'
+      - 'infra/roles/**'
+      - 'ansible.cfg'
+      - 'Makefile'
+      - '.github/workflows/ansible.yml'
+  pull_request:
+    paths:
+      - 'playbooks/**'
+      - 'inventories/**'
+      - 'group_vars/**'
+      - 'infra/roles/**'
+      - 'ansible.cfg'
+      - 'Makefile'
+      - '.github/workflows/ansible.yml'
+
+jobs:
+  lint:
+    name: Lint and dry-run playbooks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Ansible tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install 'ansible>=9.0.0' 'ansible-lint>=24.2.0'
+
+      - name: Run ansible-lint
+        run: ansible-lint playbooks/site.yml
+
+      - name: Dry-run local inventory
+        run: ansible-playbook -i inventories/local playbooks/site.yml --check -e orchestration_skip_deploy=true

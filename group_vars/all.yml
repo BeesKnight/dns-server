@@ -1,0 +1,78 @@
+---
+# Global defaults shared across inventories
+
+# Toggle used by CI and development runs to avoid changing systems
+orchestration_skip_deploy: false
+
+# Baseline secret placeholders are overridden by the encrypted vault file
+# located at group_vars/all/vault.yml.
+vault_postgres_password: devpostgres
+vault_redis_password: devredis
+vault_jwt_signing_key: dev-secret
+vault_jobs_maxmind_license_key: ""
+
+# Network addressing for core services
+network:
+  postgres:
+    host: postgres-prod-01.internal.aezacheck
+    port: 5432
+  redis:
+    host: redis-prod-01.internal.aezacheck
+    port: 6379
+  api_gateway:
+    host: api-gw-prod-01.internal.aezacheck
+    http_port: 8088
+  dns_agents:
+    health_port: 9053
+  services_subnet: 10.20.0.0/16
+
+# Secrets resolved from vault-aware variables.
+secrets:
+  postgres_password: "{{ vault_postgres_password | default('devpostgres', true) }}"
+  redis_password: "{{ vault_redis_password | default('devredis', true) }}"
+  jwt_signing_key: "{{ vault_jwt_signing_key | default('dev-secret', true) }}"
+  jobs_maxmind_license_key: "{{ vault_jobs_maxmind_license_key | default('', true) }}"
+
+# Common environment variables exported to Go services
+POSTGRES_HOST: "{{ network.postgres.host }}"
+POSTGRES_PORT: "{{ network.postgres.port }}"
+POSTGRES_DB: aezacheck
+POSTGRES_USER: postgres
+POSTGRES_PASSWORD: "{{ secrets.postgres_password }}"
+DATABASE_URL: >-
+  postgres://{{ POSTGRES_USER }}:{{ POSTGRES_PASSWORD }}@{{ POSTGRES_HOST }}:{{ POSTGRES_PORT }}/{{ POSTGRES_DB }}?sslmode=disable
+
+REDIS_HOST: "{{ network.redis.host }}"
+REDIS_PORT: "{{ network.redis.port }}"
+REDIS_PASSWORD: "{{ secrets.redis_password }}"
+REDIS_ADDR: "{{ REDIS_HOST }}:{{ REDIS_PORT }}"
+REDIS_URL: "redis://:{{ REDIS_PASSWORD }}@{{ REDIS_ADDR }}/0"
+
+STREAM_TASKS: check_tasks
+
+# Shared GeoIP configuration
+geoip_data_dir: /opt/aezacheck/data
+geoip_update_cron: "0 */6 * * *"
+
+# Performance tuning knobs consumed by multiple roles
+performance:
+  go_app_memory_default: 512M
+  go_app_cpu_quota_default: "80%"
+  redis_maxmemory: 4gb
+  postgres_shared_buffers: 2GB
+  dns_agent_max_inflight: 8192
+
+# Telemetry defaults used when dedicated group vars are not provided
+telemetry_defaults:
+  loki_endpoint: https://loki.prod.example.com/loki/api/v1/push
+  metrics_redis_url: "redis://{{ REDIS_ADDR }}/0"
+  metrics_redis_queue: agent:dispatch:prod
+  jobs_database_dsn: "host={{ POSTGRES_HOST }} dbname=jobs user=jobs password={{ POSTGRES_PASSWORD }}"
+  enable_alerts: true
+  jobs_heartbeat_threshold_seconds: 120
+  prometheus_rules_dir: /etc/prometheus/rules.d/production
+
+# Compatibility exports for roles expecting legacy variable names
+postgres_password: "{{ secrets.postgres_password }}"
+redis_password: "{{ secrets.redis_password }}"
+vault_jobs_db_password: "{{ secrets.postgres_password }}"

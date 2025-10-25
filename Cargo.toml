@@ -1,5 +1,5 @@
 [package]
-name = "codecrafters-dns-server"
+name = "dns_agent"
 version = "0.1.0"
 authors = ["Codecrafters <hello@codecrafters.io>"]
 edition = "2021"
@@ -23,7 +23,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 hostname = "0.3"
 metrics = "0.23"
-socket2 = "0.5"
+socket2 = { version = "0.5", features = ["all"] }
 
 [dev-dependencies]
 futures = "0.3"
@@ -35,3 +35,9 @@ rand = "0.8"
 
 [build-dependencies]
 num_cpus = "1.16"
+
+[target.'cfg(unix)'.dependencies]
+pnet_packet = "0.34"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.54", features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper"] }

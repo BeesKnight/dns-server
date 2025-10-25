@@ -7,16 +7,16 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug unit tests in library 'codecrafters_dns_server'",
+            "name": "Debug unit tests in library 'dns_agent'",
             "cargo": {
                 "args": [
                     "test",
                     "--no-run",
                     "--lib",
-                    "--package=codecrafters-dns-server"
+                    "--package=dns_agent"
                 ],
                 "filter": {
-                    "name": "codecrafters_dns_server",
+                    "name": "dns_agent",
                     "kind": "lib"
                 }
             },
@@ -26,15 +26,15 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug executable 'codecrafters-dns-server'",
+            "name": "Debug executable 'dns_agent'",
             "cargo": {
                 "args": [
                     "build",
-                    "--bin=codecrafters-dns-server",
-                    "--package=codecrafters-dns-server"
+                    "--bin=dns_agent",
+                    "--package=dns_agent"
                 ],
                 "filter": {
-                    "name": "codecrafters-dns-server",
+                    "name": "dns_agent",
                     "kind": "bin"
                 }
             },
@@ -44,16 +44,16 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug unit tests in executable 'codecrafters-dns-server'",
+            "name": "Debug unit tests in executable 'dns_agent'",
             "cargo": {
                 "args": [
                     "test",
                     "--no-run",
-                    "--bin=codecrafters-dns-server",
-                    "--package=codecrafters-dns-server"
+                    "--bin=dns_agent",
+                    "--package=dns_agent"
                 ],
                 "filter": {
-                    "name": "codecrafters-dns-server",
+                    "name": "dns_agent",
                     "kind": "bin"
                 }
             },

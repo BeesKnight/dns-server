@@ -4,9 +4,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use codecrafters_dns_server::control_plane::{Lease, LeaseReport, TaskKind, TaskSpec, TcpSpec};
-use codecrafters_dns_server::dispatcher::{spawn_dispatcher, DispatcherConfig, LeaseAssignment};
-use codecrafters_dns_server::workers::{
+use dns_agent::control_plane::{Lease, LeaseReport, TaskKind, TaskSpec, TcpSpec};
+use dns_agent::dispatcher::{spawn_dispatcher, DispatcherConfig, LeaseAssignment};
+use dns_agent::workers::{
     spawn_worker_pools, ReportSink, TcpWorker, WorkerHandlers, WorkerPoolsConfig,
 };
 use support::{build_tasks, AgentPipeline, AgentPipelineConfig, MockBackend, TaskType};

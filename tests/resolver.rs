@@ -7,9 +7,7 @@ use std::{
     time::Duration,
 };
 
-use codecrafters_dns_server::{
-    resolver::DnsResolver, BytePacketBuf, Dns, DnsRecord, QueryType, ResultCode,
-};
+use dns_agent::{resolver::DnsResolver, BytePacketBuf, Dns, DnsRecord, QueryType, ResultCode};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, UdpSocket},

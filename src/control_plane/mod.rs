@@ -82,6 +82,12 @@ pub struct PingSpec {
     pub host: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit_per_sec: Option<u32>,
 }
 
 /// Specification for traceroute checks.

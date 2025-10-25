@@ -1,5 +1,7 @@
 mod support;
 
+use std::collections::VecDeque;
+use std::net::SocketAddr;
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
@@ -11,13 +13,13 @@ use async_trait::async_trait;
 use tokio::sync::{Mutex, Notify, Semaphore};
 use tokio::time::Instant;
 
-use codecrafters_dns_server::control_plane::{
+use dns_agent::control_plane::{
     Lease, LeaseReport, Observation, PingSpec, TaskKind, TaskSpec, TcpSpec, TraceSpec,
 };
-use codecrafters_dns_server::dispatcher::{spawn_dispatcher, DispatcherConfig, LeaseAssignment};
-use codecrafters_dns_server::workers::{
-    spawn_worker_pools, ReportSink, TcpWorker, WorkerHandler, WorkerHandlers, WorkerPoolsConfig,
-    WorkerReport,
+use dns_agent::dispatcher::{spawn_dispatcher, DispatcherConfig, LeaseAssignment};
+use dns_agent::workers::{
+    spawn_worker_pools, PingEngine, PingProbeOutcome, PingProtocol, PingRequest, PingWorker,
+    ReportSink, TcpWorker, WorkerHandler, WorkerHandlers, WorkerPoolsConfig, WorkerReport,
 };
 use serde_json::json;
 use tokio::net::TcpListener;
@@ -55,6 +57,9 @@ fn dummy_spec(kind: TaskKind, id: u64) -> TaskSpec {
         TaskKind::Ping => TaskSpec::Ping(PingSpec {
             host: "127.0.0.1".into(),
             count: Some(4),
+            interval_ms: None,
+            timeout_ms: None,
+            rate_limit_per_sec: None,
         }),
         TaskKind::Trace => TaskSpec::Trace(TraceSpec {
             host: "127.0.0.1".into(),
@@ -245,6 +250,119 @@ worker_test!(tcp_worker_happy_eyeballs_fallback, {
     );
     accept.await.expect("listener task completes");
 });
+
+worker_test!(ping_worker_produces_observations, {
+    let engine: Arc<dyn PingEngine> = Arc::new(MockPingEngine::new(vec![
+        PingProbeOutcome::Success {
+            address: SocketAddr::from(([127, 0, 0, 1], 0)),
+            rtt: Duration::from_millis(8),
+            bytes: 64,
+            ttl: Some(52),
+        },
+        PingProbeOutcome::Timeout {
+            address: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
+            protocol: PingProtocol::Icmp,
+        },
+        PingProbeOutcome::FallbackSuccess {
+            address: SocketAddr::from(([127, 0, 0, 1], 80)),
+            rtt: Duration::from_millis(30),
+        },
+    ]));
+
+    let worker = PingWorker::with_engine(engine);
+    let lease = Lease {
+        lease_id: 42,
+        task_id: 100,
+        kind: TaskKind::Ping,
+        lease_until_ms: 0,
+        spec: TaskSpec::Ping(PingSpec {
+            host: "127.0.0.1".into(),
+            count: Some(3),
+            interval_ms: Some(10),
+            timeout_ms: Some(200),
+            rate_limit_per_sec: Some(10),
+        }),
+    };
+    let assignment = LeaseAssignment::new(lease, CancellationToken::new());
+
+    let report = worker
+        .handle(assignment)
+        .await
+        .expect("ping worker should succeed");
+    let (completed, cancelled) = report.into_parts();
+    assert!(cancelled.is_empty());
+    assert_eq!(completed.len(), 1);
+
+    let observations = &completed[0].observations;
+    assert_eq!(observations.len(), 4);
+    for attempt in &observations[..3] {
+        assert_eq!(attempt.name, "ping_attempt");
+    }
+    let success_value = observations[0].value.as_object().expect("attempt json");
+    assert_eq!(
+        success_value
+            .get("protocol")
+            .and_then(|value| value.as_str()),
+        Some("icmp")
+    );
+    assert_eq!(
+        success_value
+            .get("success")
+            .and_then(|value| value.as_bool()),
+        Some(true)
+    );
+
+    let fallback_value = observations[2].value.as_object().expect("fallback json");
+    assert_eq!(
+        fallback_value
+            .get("protocol")
+            .and_then(|value| value.as_str()),
+        Some("tcp_syn")
+    );
+    assert_eq!(
+        fallback_value
+            .get("success")
+            .and_then(|value| value.as_bool()),
+        Some(true)
+    );
+
+    let summary = observations.last().expect("summary observation");
+    assert_eq!(summary.name, "ping_summary");
+    let summary_value = summary.value.as_object().expect("summary json");
+    assert_eq!(summary_value.get("sent").and_then(|v| v.as_u64()), Some(3));
+    assert_eq!(
+        summary_value.get("received").and_then(|v| v.as_u64()),
+        Some(2)
+    );
+    let reasons = summary_value
+        .get("reasons")
+        .and_then(|value| value.as_object())
+        .expect("reasons map");
+    assert_eq!(reasons.get("timeout").and_then(|v| v.as_u64()), Some(1));
+});
+
+struct MockPingEngine {
+    outcomes: Mutex<VecDeque<PingProbeOutcome>>,
+}
+
+impl MockPingEngine {
+    fn new(outcomes: Vec<PingProbeOutcome>) -> Self {
+        Self {
+            outcomes: Mutex::new(VecDeque::from(outcomes)),
+        }
+    }
+}
+
+#[async_trait]
+impl PingEngine for MockPingEngine {
+    async fn probe(&self, _request: PingRequest, _cancel: CancellationToken) -> PingProbeOutcome {
+        let mut guard = self.outcomes.lock().await;
+        guard.pop_front().unwrap_or(PingProbeOutcome::Timeout {
+            address: None,
+            protocol: PingProtocol::Icmp,
+        })
+    }
+}
 
 worker_test!(tcp_worker_reports_cancellation_summary, {
     let worker = TcpWorker::default();

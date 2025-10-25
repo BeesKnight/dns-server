@@ -55,3 +55,9 @@ variant-specific data:
 
 Observation values are arbitrary JSON values and may optionally include a `unit`
 string.
+
+## Документация
+- [Обзор проекта](docs/overview.md)
+- [Архитектура и код](docs/code.md)
+- [Инфраструктура и CI/CD](docs/ci_cd.md)
+- [Runbook](docs/runbook.md)

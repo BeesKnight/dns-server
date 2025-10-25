@@ -10,7 +10,14 @@ import {
   type GeoProjection
 } from "d3-geo";
 import { feature } from "topojson-client";
-import type { FeatureCollection, Feature, MultiPolygon, Polygon } from "geojson";
+import type {
+  FeatureCollection,
+  Feature,
+  GeoJsonProperties,
+  Geometry,
+  MultiPolygon,
+  Polygon,
+} from "geojson";
 import { mapSSE } from "../lib/api";
 
 const BORDER_STROKE = "rgba(148, 210, 255, 0.35)";
@@ -231,7 +238,7 @@ const BASE_ROUTES: NetworkRoute[] = [
   }
 ];
 
-function useSize(ref: React.RefObject<HTMLElement>) {
+function useSize<T extends HTMLElement>(ref: React.RefObject<T | null>) {
   const [size, setSize] = useState({ w: 0, h: 0 });
   useEffect(() => {
     if (!ref.current) return;
@@ -271,9 +278,14 @@ export default function Map2D({ offsetTop = 0 }: Props) {
   useEffect(() => {
     let alive = true;
     (async () => {
-      const topo = await fetch("https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json").then(r => r.json());
+      const topo = await fetch("https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json").then((r) =>
+        r.json()
+      );
       if (!alive) return;
-      const fc = feature(topo, topo.objects.countries) as FeatureCollection;
+      const fc = feature(
+        topo,
+        topo.objects.countries
+      ) as unknown as FeatureCollection<Geometry, GeoJsonProperties>;
       setWorldFc(fc);
       const map: Record<string, [number, number]> = {};
       for (const f of fc.features as WorldFeature[]) {

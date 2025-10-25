@@ -6,6 +6,7 @@ export type User = {
   email: string;
   role: string;
   last_login_at?: string;
+  current_ip?: string | null;
 };
 
 /* ================= Helpers ================= */

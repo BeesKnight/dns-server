@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import Globe, { GlobeMethods } from "react-globe.gl";
+import type { GlobeProps } from "react-globe.gl";
 import { feature } from "topojson-client";
 import { geoCentroid, geoArea } from "d3-geo";
 import type { FeatureCollection, Feature, MultiPolygon, Polygon } from "geojson";
@@ -51,7 +52,7 @@ const LAND_STROKE = "rgba(56, 189, 248, .35)";
 const LABEL_COLOR = "rgba(226,232,240,.92)";
 
 export default function MapGlobe() {
-  const globeRef = useRef<GlobeMethods>();
+  const globeRef = useRef<GlobeMethods | undefined>(undefined);
   const camAltRef = useRef(1.6);         // текущая высота камеры
   const [tick, setTick] = useState(0);   // лёгкий триггер пересчёта LOD
 
@@ -223,7 +224,7 @@ export default function MapGlobe() {
   const zoomRaf = useRef<number | null>(null);
 
   /* ---------- размер шрифта от площади (без тяжёлых вычислений) ---------- */
-  const labelSize = (d: CountryLabel) => {
+  const computeLabelSize = (d: CountryLabel) => {
     const a = d.area; // 0..~0.2
     if (a > 0.08) return 1.35; // крупные (Россия, Канада, Китай)
     if (a > 0.05) return 1.05;
@@ -232,6 +233,22 @@ export default function MapGlobe() {
     if (a > 0.005) return 0.64;
     return 0.56;
   };
+
+  const labelLatAccessor: GlobeProps["labelLat"] = (d) => (d as CountryLabel).lat;
+  const labelLngAccessor: GlobeProps["labelLng"] = (d) => (d as CountryLabel).lng;
+  const labelTextAccessor: GlobeProps["labelText"] = (d) => (d as CountryLabel).name;
+  const labelSizeAccessor: GlobeProps["labelSize"] = (d) =>
+    computeLabelSize(d as CountryLabel);
+  const pointLatAccessor: GlobeProps["pointLat"] = (d) => (d as Dot).lat;
+  const pointLngAccessor: GlobeProps["pointLng"] = (d) => (d as Dot).lng;
+  const pointColorAccessor: GlobeProps["pointColor"] = (d) => (d as Dot).color;
+  const pointRadiusAccessor: GlobeProps["pointRadius"] = (d) => (d as Dot).size;
+  const pointLabelAccessor: GlobeProps["pointLabel"] = (d) => (d as Dot).label || "";
+  const arcStartLatAccessor: GlobeProps["arcStartLat"] = (d) => (d as Arc).startLat;
+  const arcStartLngAccessor: GlobeProps["arcStartLng"] = (d) => (d as Arc).startLng;
+  const arcEndLatAccessor: GlobeProps["arcEndLat"] = (d) => (d as Arc).endLat;
+  const arcEndLngAccessor: GlobeProps["arcEndLng"] = (d) => (d as Arc).endLng;
+  const arcColorAccessor: GlobeProps["arcColor"] = (d: object) => (d as Arc).color;
 
   return (
     <div className="h-[70vh] md:h-[80vh] w-full">
@@ -256,10 +273,10 @@ export default function MapGlobe() {
 
         /* подписи стран (точно по центроиду, чуть приподняты) */
         labelsData={visibleLabels}
-        labelLat={(d: CountryLabel) => d.lat}
-        labelLng={(d: CountryLabel) => d.lng}
-        labelText={(d: CountryLabel) => d.name}
-        labelSize={labelSize}
+        labelLat={labelLatAccessor}
+        labelLng={labelLngAccessor}
+        labelText={labelTextAccessor}
+        labelSize={labelSizeAccessor}
         labelColor={() => LABEL_COLOR}
         labelAltitude={0.03}
         labelResolution={2}
@@ -267,20 +284,20 @@ export default function MapGlobe() {
 
         /* точки (агенты/цели) */
         pointsData={points}
-        pointLat={(d: Dot) => d.lat}
-        pointLng={(d: Dot) => d.lng}
+        pointLat={pointLatAccessor}
+        pointLng={pointLngAccessor}
         pointAltitude={0.01}
-        pointColor={(d: Dot) => d.color}
-        pointRadius={(d: Dot) => d.size}
-        pointLabel={(d: Dot) => d.label || ""}
+        pointColor={pointColorAccessor}
+        pointRadius={pointRadiusAccessor}
+        pointLabel={pointLabelAccessor}
 
         /* дуги */
         arcsData={arcs}
-        arcStartLat={(d: Arc) => d.startLat}
-        arcStartLng={(d: Arc) => d.startLng}
-        arcEndLat={(d: Arc) => d.endLat}
-        arcEndLng={(d: Arc) => d.endLng}
-        arcColor={(d: Arc) => d.color}
+        arcStartLat={arcStartLatAccessor}
+        arcStartLng={arcStartLngAccessor}
+        arcEndLat={arcEndLatAccessor}
+        arcEndLng={arcEndLngAccessor}
+        arcColor={arcColorAccessor}
         arcAltitude={0.25}
         arcStroke={0.6}
         arcDashLength={0.45}

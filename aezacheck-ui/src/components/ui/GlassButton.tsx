@@ -15,13 +15,13 @@ type BaseProps = {
 };
 
 type LinkVariantProps = BaseProps &
-  Omit<LinkProps, "className" | "to"> & {
+  Omit<LinkProps, "className" | "to" | "type"> & {
     to: LinkProps["to"];
     href?: undefined;
   };
 
 type AnchorVariantProps = BaseProps &
-  Omit<AnchorHTMLAttributes<HTMLAnchorElement>, "className" | "href"> & {
+  Omit<AnchorHTMLAttributes<HTMLAnchorElement>, "className" | "href" | "type"> & {
     href: string;
     to?: undefined;
   };
@@ -54,7 +54,7 @@ export default function GlassButton(props: Props) {
       size = "md",
       className = "",
       ...rest
-    } = props;
+    } = props as LinkVariantProps;
     const cls = `${base} ${sizes[size]} ${className}`.trim();
     return (
       <Link to={to} className={cls} {...rest}>
@@ -74,7 +74,7 @@ export default function GlassButton(props: Props) {
       size = "md",
       className = "",
       ...rest
-    } = props;
+    } = props as AnchorVariantProps;
     const cls = `${base} ${sizes[size]} ${className}`.trim();
     return (
       <a href={href} className={cls} {...rest}>
@@ -85,14 +85,8 @@ export default function GlassButton(props: Props) {
     );
   }
 
-  const {
-    children,
-    iconLeft,
-    iconRight,
-    size = "md",
-    className = "",
-    ...rest
-  } = props;
+  const { children, iconLeft, iconRight, size = "md", className = "", ...rest } =
+    props as ButtonVariantProps;
   const cls = `${base} ${sizes[size]} ${className}`.trim();
   return (
     <button className={cls} {...rest}>

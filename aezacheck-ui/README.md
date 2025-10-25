@@ -1,73 +1,41 @@
-# React + TypeScript + Vite
+# AezaCheck UI
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+This package contains the frontend shell for the AezaCheck operator console. It
+is implemented with React + TypeScript (Vite) and renders live telemetry from
+the jobs control plane.
 
-Currently, two official plugins are available:
+## Map telemetry stream
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+The map view subscribes to the jobs service Server-Sent Events (SSE) endpoint
+`/v1/map/events`. When creating an `EventSource`, append the `access_token`
+query parameter – browsers omit `Authorization` headers for EventSource
+connections. Example:
 
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```ts
+const source = new EventSource(`${apiBase}/v1/map/events?access_token=${token}`);
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+The stream sends keepalive comments every 15 seconds. Individual events are
+JSON payloads with these types:
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+| Type           | Description                                                                  |
+| -------------- | ---------------------------------------------------------------------------- |
+| `agent.online` | Agent heartbeat/registration. `data.agent` contains `id`, `ip`, `geo`.       |
+| `check.start`  | A check has been leased. `data.source/target.geo` contain the geolocation.   |
+| `check.result` | Intermediate result with status (`ok`, `error`, `cancelled`, etc.).          |
+| `check.done`   | Final completion marker. Includes `status` and the originating source geo.   |
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+The SLA for the UI is sub-second delivery from publish to UI receipt and a
+maximum keepalive interval of 15 seconds.
+
+## Local development
+
+Install dependencies and run the dev server:
+
+```bash
+npm install
+npm run dev
 ```
+
+Set `VITE_API_BASE_URL` in your `.env.local` so the frontend can reach the API
+Gateway (for example, `http://localhost:8088`).

@@ -19,8 +19,10 @@ export default function QuickCheckCard() {
       // минимальный «quick» шаблон: http + ping + dns
       await api.startQuickCheck(url.trim());
       // дальше можно показать тост/статус, подписаться на SSE и т.д.
-    } catch (e: any) {
-      setErr(e?.message || "Не удалось запустить проверку");
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error ? error.message : "Не удалось запустить проверку";
+      setErr(message);
     } finally {
       setLoading(false);
     }

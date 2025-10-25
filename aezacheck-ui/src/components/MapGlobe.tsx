@@ -1,9 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Globe, { GlobeMethods } from "react-globe.gl";
+import type { GlobeProps } from "react-globe.gl";
 import { feature } from "topojson-client";
 import { geoCentroid, geoArea } from "d3-geo";
 import type { FeatureCollection, Feature, MultiPolygon, Polygon } from "geojson";
 import { mapSSE } from "../lib/api";
+import type { GeometryCollection, Topology } from "topojson-specification";
 
 /* ---------- типы точек/дуг (как у вас) ---------- */
 type Arc = {
@@ -26,10 +28,13 @@ type Dot = {
 };
 
 /* ---------- типы стран/подписей ---------- */
-type CountryFeature = Feature<
-  Polygon | MultiPolygon,
-  { name?: string; ADMIN?: string; name_long?: string }
->;
+type CountryProperties = { name?: string; ADMIN?: string; name_long?: string };
+
+type CountryFeature = Feature<Polygon | MultiPolygon, CountryProperties>;
+
+type CountriesTopology = Topology<{
+  countries: GeometryCollection;
+}>;
 
 type CountryLabel = {
   id: number;
@@ -47,12 +52,13 @@ const LAND_STROKE = "rgba(56, 189, 248, .35)";
 const LABEL_COLOR = "rgba(226,232,240,.92)";
 
 export default function MapGlobe() {
-  const globeRef = useRef<GlobeMethods>();
+  const globeRef = useRef<GlobeMethods | undefined>(undefined);
   const camAltRef = useRef(1.6);         // текущая высота камеры
   const [tick, setTick] = useState(0);   // лёгкий триггер пересчёта LOD
 
   const [polygons, setPolygons] = useState<CountryFeature[]>([]);
   const [labelsAll, setLabelsAll] = useState<CountryLabel[]>([]);
+  const [visibleLabels, setVisibleLabels] = useState<CountryLabel[]>([]);
   const [arcs, setArcs] = useState<Arc[]>([]);
   const [points, setPoints] = useState<Dot[]>([]);
 
@@ -63,11 +69,12 @@ export default function MapGlobe() {
 
     fetch("https://unpkg.com/world-atlas@2.0.2/countries-110m.json")
       .then((r) => r.json())
-      .then((topo: any) => {
+      .then((topologyRaw: unknown) => {
+        const topo = topologyRaw as CountriesTopology;
         const fc = feature(
           topo,
           topo.objects.countries
-        ) as FeatureCollection<Polygon | MultiPolygon, any>;
+        ) as FeatureCollection<Polygon | MultiPolygon, CountryProperties>;
 
         const feats = fc.features as CountryFeature[];
         setPolygons(feats);
@@ -85,8 +92,9 @@ export default function MapGlobe() {
             if (!rawName) return null;
 
             // d3-гео: centroid => [lng, lat]
-            const c = geoCentroid(f as any);
-            const area = geoArea(f as any);
+            const featureGeometry = f as Feature<Polygon | MultiPolygon, CountryProperties>;
+            const c = geoCentroid(featureGeometry);
+            const area = geoArea(featureGeometry);
 
             return {
               id: i,
@@ -109,6 +117,19 @@ export default function MapGlobe() {
         // оффлайн — просто без подписей
       });
   }, []);
+
+  useEffect(() => {
+    const alt = camAltRef.current;
+
+    let take = 0;
+    if (alt > 2.2) take = 20;
+    else if (alt > 1.7) take = 45;
+    else if (alt > 1.4) take = 80;
+    else if (alt > 1.2) take = 120;
+    else take = 160;
+
+    setVisibleLabels(labelsAll.slice(0, take));
+  }, [labelsAll, tick]);
 
   /* ---------- простая SSE-логика (оставил как было) ---------- */
   useEffect(() => {
@@ -186,20 +207,6 @@ export default function MapGlobe() {
   }, []);
 
   /* ---------- динамический LOD для подписей (без лагов) ---------- */
-  const visibleLabels = useMemo(() => {
-    const alt = camAltRef.current;
-
-    // чем выше — тем меньше подписей
-    let take = 0;
-    if (alt > 2.2) take = 20;
-    else if (alt > 1.7) take = 45;
-    else if (alt > 1.4) take = 80;
-    else if (alt > 1.2) take = 120;
-    else take = 160;
-
-    return labelsAll.slice(0, take);
-  }, [labelsAll, tick]);
-
   // без setState на каждый zoom — только лёгкий "ping"
   const handleZoom = () => {
     const a = globeRef.current?.pointOfView()?.altitude;
@@ -217,7 +224,7 @@ export default function MapGlobe() {
   const zoomRaf = useRef<number | null>(null);
 
   /* ---------- размер шрифта от площади (без тяжёлых вычислений) ---------- */
-  const labelSize = (d: CountryLabel) => {
+  const computeLabelSize = (d: CountryLabel) => {
     const a = d.area; // 0..~0.2
     if (a > 0.08) return 1.35; // крупные (Россия, Канада, Китай)
     if (a > 0.05) return 1.05;
@@ -226,6 +233,22 @@ export default function MapGlobe() {
     if (a > 0.005) return 0.64;
     return 0.56;
   };
+
+  const labelLatAccessor: GlobeProps["labelLat"] = (d) => (d as CountryLabel).lat;
+  const labelLngAccessor: GlobeProps["labelLng"] = (d) => (d as CountryLabel).lng;
+  const labelTextAccessor: GlobeProps["labelText"] = (d) => (d as CountryLabel).name;
+  const labelSizeAccessor: GlobeProps["labelSize"] = (d) =>
+    computeLabelSize(d as CountryLabel);
+  const pointLatAccessor: GlobeProps["pointLat"] = (d) => (d as Dot).lat;
+  const pointLngAccessor: GlobeProps["pointLng"] = (d) => (d as Dot).lng;
+  const pointColorAccessor: GlobeProps["pointColor"] = (d) => (d as Dot).color;
+  const pointRadiusAccessor: GlobeProps["pointRadius"] = (d) => (d as Dot).size;
+  const pointLabelAccessor: GlobeProps["pointLabel"] = (d) => (d as Dot).label || "";
+  const arcStartLatAccessor: GlobeProps["arcStartLat"] = (d) => (d as Arc).startLat;
+  const arcStartLngAccessor: GlobeProps["arcStartLng"] = (d) => (d as Arc).startLng;
+  const arcEndLatAccessor: GlobeProps["arcEndLat"] = (d) => (d as Arc).endLat;
+  const arcEndLngAccessor: GlobeProps["arcEndLng"] = (d) => (d as Arc).endLng;
+  const arcColorAccessor: GlobeProps["arcColor"] = (d: object) => (d as Arc).color;
 
   return (
     <div className="h-[70vh] md:h-[80vh] w-full">
@@ -250,10 +273,10 @@ export default function MapGlobe() {
 
         /* подписи стран (точно по центроиду, чуть приподняты) */
         labelsData={visibleLabels}
-        labelLat={(d: CountryLabel) => d.lat}
-        labelLng={(d: CountryLabel) => d.lng}
-        labelText={(d: CountryLabel) => d.name}
-        labelSize={labelSize}
+        labelLat={labelLatAccessor}
+        labelLng={labelLngAccessor}
+        labelText={labelTextAccessor}
+        labelSize={labelSizeAccessor}
         labelColor={() => LABEL_COLOR}
         labelAltitude={0.03}
         labelResolution={2}
@@ -261,20 +284,20 @@ export default function MapGlobe() {
 
         /* точки (агенты/цели) */
         pointsData={points}
-        pointLat={(d: Dot) => d.lat}
-        pointLng={(d: Dot) => d.lng}
+        pointLat={pointLatAccessor}
+        pointLng={pointLngAccessor}
         pointAltitude={0.01}
-        pointColor={(d: Dot) => d.color}
-        pointRadius={(d: Dot) => d.size}
-        pointLabel={(d: Dot) => d.label || ""}
+        pointColor={pointColorAccessor}
+        pointRadius={pointRadiusAccessor}
+        pointLabel={pointLabelAccessor}
 
         /* дуги */
         arcsData={arcs}
-        arcStartLat={(d: Arc) => d.startLat}
-        arcStartLng={(d: Arc) => d.startLng}
-        arcEndLat={(d: Arc) => d.endLat}
-        arcEndLng={(d: Arc) => d.endLng}
-        arcColor={(d: Arc) => d.color}
+        arcStartLat={arcStartLatAccessor}
+        arcStartLng={arcStartLngAccessor}
+        arcEndLat={arcEndLatAccessor}
+        arcEndLng={arcEndLngAccessor}
+        arcColor={arcColorAccessor}
         arcAltitude={0.25}
         arcStroke={0.6}
         arcDashLength={0.45}

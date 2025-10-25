@@ -335,6 +335,11 @@ func (a *App) jwtAuth() func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			raw := bearer(r)
 			if raw == "" {
+				if tok := strings.TrimSpace(r.URL.Query().Get("access_token")); tok != "" {
+					raw = tok
+				}
+			}
+			if raw == "" {
 				http.Error(w, "missing bearer", http.StatusUnauthorized)
 				return
 			}

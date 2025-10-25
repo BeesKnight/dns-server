@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -130,7 +133,7 @@ func TestHandleExtendExtendsLeaseDeadline(t *testing.T) {
 	}
 	defer mr.Close()
 
-	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr(), Protocol: 2})
 	defer rdb.Close()
 
 	agentID := uuid.New()
@@ -521,5 +524,142 @@ func TestHandleCheckGeoIncludesGeoInformation(t *testing.T) {
 	hopGeo := hops[0].(map[string]any)["geo"].(map[string]any)
 	if hopGeo["asn"].(float64) != 64500 {
 		t.Fatalf("expected hop geo ASN, got %#v", hopGeo)
+	}
+}
+
+func TestMapEventsSSE(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("start miniredis: %v", err)
+	}
+	defer mr.Close()
+
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr(), Protocol: 2})
+	defer rdb.Close()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
+	app := &App{
+		cfg:   Config{MapPubChannel: "map:events", MapStream: "map_events", MapStreamMaxLen: 128},
+		redis: rdb,
+		log:   logger,
+	}
+
+	router := chi.NewRouter()
+	router.Get("/v1/map/events", app.handleMapEvents)
+
+	srv := httptest.NewServer(router)
+	defer srv.Close()
+
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/v1/map/events?access_token=test", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("sse request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "text/event-stream") {
+		t.Fatalf("unexpected content-type: %q", ct)
+	}
+
+	reader := bufio.NewReader(resp.Body)
+	lineCh := make(chan string, 4)
+	errCh := make(chan error, 1)
+	go func() {
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				errCh <- err
+				return
+			}
+			lineCh <- strings.TrimSpace(line)
+		}
+	}()
+
+	start := time.Now()
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		app.publishMapEvent(context.Background(), mapEvent{Type: "check.done", Data: map[string]any{"check_id": uuid.New()}})
+	}()
+
+	timeout := time.After(2 * time.Second)
+	var payload string
+loop:
+	for {
+		select {
+		case <-timeout:
+			t.Fatalf("no SSE payload received")
+		case err := <-errCh:
+			t.Fatalf("read sse: %v", err)
+		case line := <-lineCh:
+			if strings.HasPrefix(line, "data: ") {
+				payload = strings.TrimSpace(strings.TrimPrefix(line, "data: "))
+				break loop
+			}
+		}
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
+		t.Fatalf("decode sse payload: %v", err)
+	}
+	if decoded["type"] != "check.done" {
+		t.Fatalf("unexpected event type: %#v", decoded["type"])
+	}
+	if _, ok := decoded["ts"].(string); !ok {
+		t.Fatalf("expected timestamp in event: %#v", decoded)
+	}
+	if dur := time.Since(start); dur > time.Second {
+		t.Fatalf("event arrived too late: %v", dur)
+	}
+}
+
+func TestMapSnapshotLimit(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("start miniredis: %v", err)
+	}
+	defer mr.Close()
+
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr(), Protocol: 2})
+	defer rdb.Close()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
+	app := &App{
+		cfg:   Config{MapStream: "map_events", MapStreamMaxLen: 128},
+		redis: rdb,
+		log:   logger,
+	}
+
+	ctx := context.Background()
+	for i := 0; i < 3; i++ {
+		if _, err := rdb.XAdd(ctx, &redis.XAddArgs{Stream: app.cfg.MapStream, Values: map[string]any{"json": fmt.Sprintf(`{"seq":%d}`, i)}}).Result(); err != nil {
+			t.Fatalf("seed stream: %v", err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/map/snapshot?limit=2&minutes=5", nil)
+	w := httptest.NewRecorder()
+	app.handleMapSnapshot(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Items      []json.RawMessage `json:"items"`
+		NextCursor string            `json:"next_cursor"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal snapshot: %v", err)
+	}
+	if len(resp.Items) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(resp.Items))
+	}
+	if strings.TrimSpace(resp.NextCursor) == "" {
+		t.Fatalf("expected next cursor")
 	}
 }

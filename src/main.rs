@@ -1,8 +1,11 @@
 use std::{collections::HashMap, env, net::SocketAddr, sync::Arc, time::Duration};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use dns_agent::{
-    control_plane::{ControlPlaneClient, HttpControlPlaneTransport, RegisterRequest, TaskKind},
+    control_plane::{
+        AgentBootstrap, ControlPlaneClient, ControlPlaneTransport, HttpControlPlaneTransport,
+        RegisterRequest, TaskKind,
+    },
     runtime::TimerService,
     BytePacketBuf,
 };
@@ -54,6 +57,35 @@ impl ProxyConfig {
     }
 }
 
+fn bootstrap_from_env() -> Result<Option<AgentBootstrap>> {
+    let agent_id = match env::var("AGENT_ID") {
+        Ok(value) => Some(value.parse::<u64>().context("invalid AGENT_ID")?),
+        Err(env::VarError::NotPresent) => None,
+        Err(env::VarError::NotUnicode(_)) => {
+            return Err(anyhow!("AGENT_ID must be valid unicode"));
+        }
+    };
+
+    let auth_token = match env::var("AGENT_AUTH_TOKEN") {
+        Ok(value) => Some(value),
+        Err(env::VarError::NotPresent) => None,
+        Err(env::VarError::NotUnicode(_)) => {
+            return Err(anyhow!("AGENT_AUTH_TOKEN must be valid unicode"));
+        }
+    };
+
+    match (agent_id, auth_token) {
+        (Some(agent_id), Some(auth_token)) => Ok(Some(AgentBootstrap {
+            agent_id,
+            auth_token,
+        })),
+        (None, None) => Ok(None),
+        _ => Err(anyhow!(
+            "AGENT_ID and AGENT_AUTH_TOKEN must both be set when bootstrapping"
+        )),
+    }
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -75,9 +107,16 @@ async fn main() -> Result<()> {
     let concurrency_limit = Arc::new(Semaphore::new(config.max_inflight_requests));
 
     if let Ok(base_url) = env::var("AGENT_CONTROL_PLANE") {
+        let bootstrap = bootstrap_from_env()?;
         match HttpControlPlaneTransport::new(&base_url) {
             Ok(transport) => {
-                let client = ControlPlaneClient::new(transport);
+                if let Some(ref credentials) = bootstrap {
+                    transport.set_auth_headers(
+                        credentials.agent_id.to_string(),
+                        credentials.auth_token.clone(),
+                    );
+                }
+                let client = ControlPlaneClient::with_bootstrap(transport, bootstrap.clone());
                 let (batch_tx, mut batch_rx) = mpsc::channel::<Vec<u64>>(32);
                 tokio::spawn(async move {
                     while let Some(batch) = batch_rx.recv().await {
@@ -197,7 +236,13 @@ async fn run_control_plane<T>(
 ) where
     T: dns_agent::control_plane::ControlPlaneTransport + 'static,
 {
-    if let Err(err) = client
+    let snapshot = client.snapshot().await;
+    if let Some(agent_id) = snapshot.agent_id {
+        info!(
+            agent_id,
+            "restored control plane session from bootstrap state"
+        );
+    } else if let Err(err) = client
         .register(RegisterRequest {
             hostname: hostname::get()
                 .ok()

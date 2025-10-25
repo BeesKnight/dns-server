@@ -17,14 +17,29 @@ use tracing::{debug, warn};
 
 use crate::control_plane::{Observation, TaskSpec, TcpSpec};
 use crate::dispatcher::LeaseAssignment;
+use crate::runtime::SocketConfigurator;
 
 use super::{WorkerHandler, WorkerReport};
 
 const HAPPY_EYEBALLS_DELAY: Duration = Duration::from_millis(250);
 
 /// Worker implementation responsible for executing TCP checks.
-#[derive(Default)]
-pub struct TcpWorker;
+#[derive(Clone)]
+pub struct TcpWorker {
+    configurator: SocketConfigurator,
+}
+
+impl TcpWorker {
+    pub fn new(configurator: SocketConfigurator) -> Self {
+        Self { configurator }
+    }
+}
+
+impl Default for TcpWorker {
+    fn default() -> Self {
+        Self::new(SocketConfigurator::default())
+    }
+}
 
 #[async_trait]
 impl WorkerHandler for TcpWorker {
@@ -73,7 +88,8 @@ impl WorkerHandler for TcpWorker {
                 .with_observation(lease.lease_id, observation));
         }
 
-        let outcome = connect_with_happy_eyeballs(addresses, token.clone()).await;
+        let outcome =
+            connect_with_happy_eyeballs(addresses, token.clone(), self.configurator.clone()).await;
         let TcpOutcome {
             observations,
             success,
@@ -209,6 +225,7 @@ fn order_addresses(addresses: Vec<SocketAddr>) -> Vec<SocketAddr> {
 async fn connect_with_happy_eyeballs(
     addresses: Vec<SocketAddr>,
     token: CancellationToken,
+    configurator: SocketConfigurator,
 ) -> TcpOutcome {
     let race_token = CancellationToken::new();
     let mut tasks = FuturesUnordered::new();
@@ -218,6 +235,7 @@ async fn connect_with_happy_eyeballs(
             address,
             token.clone(),
             race_token.clone(),
+            configurator.clone(),
         ));
     }
 
@@ -268,6 +286,7 @@ async fn run_attempt(
     address: SocketAddr,
     global: CancellationToken,
     race: CancellationToken,
+    configurator: SocketConfigurator,
 ) -> AttemptResult {
     let attempt = TcpAttempt::new(index, address);
     if index > 0 {
@@ -286,7 +305,7 @@ async fn run_attempt(
     }
 
     let start = Instant::now();
-    let mut connect = Box::pin(connect_once(address));
+    let mut connect = Box::pin(connect_once(address, configurator));
     tokio::select! {
         res = &mut connect => {
             let elapsed = start.elapsed();
@@ -312,30 +331,22 @@ fn delay_for(index: usize) -> Duration {
         .unwrap_or_else(|| HAPPY_EYEBALLS_DELAY)
 }
 
-async fn connect_once(address: SocketAddr) -> io::Result<()> {
-    let socket = configure_socket(&address)?;
+async fn connect_once(address: SocketAddr, configurator: SocketConfigurator) -> io::Result<()> {
+    let socket = configure_socket(&address, &configurator)?;
     let stream = socket.connect(address).await?;
     stream.set_nodelay(true)?;
     Ok(())
 }
 
-fn configure_socket(address: &SocketAddr) -> io::Result<TcpSocket> {
+fn configure_socket(
+    address: &SocketAddr,
+    configurator: &SocketConfigurator,
+) -> io::Result<TcpSocket> {
     let socket = match address {
         SocketAddr::V4(_) => TcpSocket::new_v4()?,
         SocketAddr::V6(_) => TcpSocket::new_v6()?,
     };
-    socket.set_reuseaddr(true)?;
-    socket.set_nodelay(true)?;
-
-    let sock_ref = SockRef::from(&socket);
-    let _ = sock_ref.set_keepalive(true);
-
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    {
-        let keepalive = TcpKeepalive::new().with_time(Duration::from_secs(30));
-        let _ = SockRef::from(&socket).set_tcp_keepalive(&keepalive);
-    }
-
+    configurator.configure_tcp_client(&socket);
     Ok(socket)
 }
 

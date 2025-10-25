@@ -3,12 +3,13 @@ use std::{collections::HashMap, env, net::SocketAddr, sync::Arc, time::Duration}
 use anyhow::{Context, Result};
 use dns_agent::{
     control_plane::{ControlPlaneClient, HttpControlPlaneTransport, RegisterRequest, TaskKind},
+    runtime::TimerService,
     BytePacketBuf,
 };
 use tokio::{
     net::UdpSocket,
     sync::{mpsc, Semaphore},
-    time::{interval, sleep, timeout, Instant, MissedTickBehavior},
+    time::{interval, timeout, Instant, MissedTickBehavior},
 };
 use tracing::{debug, info, warn};
 
@@ -62,6 +63,7 @@ async fn main() -> Result<()> {
         .init();
 
     let config = ProxyConfig::from_env()?;
+    let timer = TimerService::new();
     info!(?config, "starting DNS proxy");
 
     let listener = Arc::new(
@@ -82,7 +84,7 @@ async fn main() -> Result<()> {
                         info!(leases = batch.len(), "dispatcher received batch");
                     }
                 });
-                tokio::spawn(run_control_plane(client, batch_tx));
+                tokio::spawn(run_control_plane(client, batch_tx, timer.clone()));
             }
             Err(err) => {
                 warn!(error = %err, "failed to initialize control plane client");
@@ -188,8 +190,11 @@ async fn handle_request(
     Ok(())
 }
 
-async fn run_control_plane<T>(client: ControlPlaneClient<T>, batch_tx: mpsc::Sender<Vec<u64>>)
-where
+async fn run_control_plane<T>(
+    client: ControlPlaneClient<T>,
+    batch_tx: mpsc::Sender<Vec<u64>>,
+    timer: TimerService,
+) where
     T: dns_agent::control_plane::ControlPlaneTransport + 'static,
 {
     if let Err(err) = client
@@ -242,7 +247,9 @@ where
         match client.claim(&capacities).await {
             Ok(batch) => {
                 if batch.leases.is_empty() {
-                    sleep(Duration::from_millis(250)).await;
+                    if timer.sleep(Duration::from_millis(250)).await.is_err() {
+                        break;
+                    }
                     continue;
                 }
                 let lease_ids: Vec<u64> = batch.leases.iter().map(|lease| lease.lease_id).collect();
@@ -252,7 +259,9 @@ where
             }
             Err(err) => {
                 warn!(error = %err, "claim loop failed");
-                sleep(Duration::from_secs(1)).await;
+                if timer.sleep(Duration::from_secs(1)).await.is_err() {
+                    break;
+                }
             }
         }
     }

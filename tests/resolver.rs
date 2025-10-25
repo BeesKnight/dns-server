@@ -231,6 +231,7 @@ async fn resolver_falls_back_to_tcp_on_truncation() {
 
 #[tokio::test]
 async fn resolver_obeys_ttl_cache() {
+    tokio::time::pause();
     let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let addr = udp.local_addr().unwrap();
     let requests = Arc::new(AtomicUsize::new(0));
@@ -304,7 +305,8 @@ async fn resolver_obeys_ttl_cache() {
         .resolve("ttl.example")
         .await
         .expect("first resolve succeeded");
-    tokio::time::sleep(Duration::from_millis(1100)).await;
+    tokio::time::advance(Duration::from_millis(1100)).await;
+    tokio::task::yield_now().await;
     resolver
         .resolve("ttl.example")
         .await

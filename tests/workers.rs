@@ -18,6 +18,7 @@ use dns_agent::control_plane::{
     Lease, LeaseReport, Observation, PingSpec, TaskKind, TaskSpec, TcpSpec, TraceSpec,
 };
 use dns_agent::dispatcher::{spawn_dispatcher, DispatcherConfig, LeaseAssignment};
+use dns_agent::runtime::{SocketConfigurator, TimerService};
 use dns_agent::workers::{
     spawn_worker_pools, PingEngine, PingProbeOutcome, PingProtocol, PingRequest, PingWorker,
     RawSocketCapability, ReportSink, TcpWorker, TraceEngine, TraceObservation, TraceProbeOutcome,
@@ -282,7 +283,8 @@ worker_test!(trace_worker_collects_observation, {
         },
     ]));
     let capability: Arc<dyn RawSocketCapability> = Arc::new(MockCapability::ok(true));
-    let worker = TraceWorker::with_engine_and_config(engine, 64, capability);
+    let worker =
+        TraceWorker::with_engine_and_config(engine, 64, capability, SocketConfigurator::default());
 
     let (assignment, _) = make_trace_assignment(
         42,
@@ -322,7 +324,8 @@ worker_test!(trace_worker_respects_rate_limits, {
         },
     ]));
     let capability: Arc<dyn RawSocketCapability> = Arc::new(MockCapability::ok(true));
-    let worker = TraceWorker::with_engine_and_config(engine, 2, capability);
+    let worker =
+        TraceWorker::with_engine_and_config(engine, 2, capability, SocketConfigurator::default());
 
     let (assignment, _) = make_trace_assignment(
         99,
@@ -349,7 +352,8 @@ worker_test!(trace_worker_marks_permission_denied, {
         vec![TraceProbeOutcome::Timeout; 3],
     ));
     let capability: Arc<dyn RawSocketCapability> = Arc::new(MockCapability::ok(false));
-    let worker = TraceWorker::with_engine_and_config(engine, 10, capability);
+    let worker =
+        TraceWorker::with_engine_and_config(engine, 10, capability, SocketConfigurator::default());
 
     let (assignment, _) = make_trace_assignment(
         55,
@@ -406,6 +410,7 @@ impl TraceEngine for MockTraceEngine {
         &self,
         request: TraceProbeRequest,
         cancel: CancellationToken,
+        _configurator: SocketConfigurator,
     ) -> TraceProbeOutcome {
         if cancel.is_cancelled() {
             return TraceProbeOutcome::Error {
@@ -444,6 +449,34 @@ impl RawSocketCapability for MockCapability {
             Err(kind) => Err(std::io::Error::from(kind)),
         }
     }
+}
+
+#[tokio::test]
+async fn timer_service_respects_virtual_time() {
+    tokio::time::pause();
+    let timer = TimerService::new();
+    let flag = Arc::new(AtomicBool::new(false));
+    let worker_flag = flag.clone();
+
+    timer
+        .schedule(Duration::from_millis(50), async move {
+            worker_flag.store(true, Ordering::SeqCst);
+        })
+        .expect("timer scheduled");
+
+    tokio::time::advance(Duration::from_millis(40)).await;
+    assert!(
+        !flag.load(Ordering::SeqCst),
+        "timer fired before virtual time advanced sufficiently"
+    );
+
+    tokio::time::advance(Duration::from_millis(20)).await;
+    tokio::task::yield_now().await;
+
+    assert!(
+        flag.load(Ordering::SeqCst),
+        "timer did not fire after advancing virtual time"
+    );
 }
 
 worker_test!(ping_worker_produces_observations, {
@@ -550,7 +583,12 @@ impl MockPingEngine {
 
 #[async_trait]
 impl PingEngine for MockPingEngine {
-    async fn probe(&self, _request: PingRequest, _cancel: CancellationToken) -> PingProbeOutcome {
+    async fn probe(
+        &self,
+        _request: PingRequest,
+        _cancel: CancellationToken,
+        _configurator: SocketConfigurator,
+    ) -> PingProbeOutcome {
         let mut guard = self.outcomes.lock().await;
         guard.pop_front().unwrap_or(PingProbeOutcome::Timeout {
             address: None,

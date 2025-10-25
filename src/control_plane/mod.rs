@@ -746,7 +746,9 @@ mod tests {
         };
         let json = serde_json::to_value(&request).expect("serialize claim");
         assert_eq!(json["agent_id"], 7);
-        let caps = json["capacities"].as_object().unwrap();
+        let caps = json["capacities"]
+            .as_object()
+            .expect("serialized capacities should be an object");
         assert_eq!(caps["dns"], 4);
         assert_eq!(caps["http"], 2);
     }

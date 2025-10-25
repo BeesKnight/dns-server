@@ -32,8 +32,10 @@ export default function CheckSheet({ open, onOpenChange }: Props) {
       setLoading(true);
       await api.startQuickCheck(url.trim());
       // тут можно показать тост/уведомление «Проверка запущена»
-    } catch (e: any) {
-      setErr(e?.message || "Не удалось запустить проверку");
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error ? error.message : "Не удалось запустить проверку";
+      setErr(message);
     } finally {
       setLoading(false);
     }

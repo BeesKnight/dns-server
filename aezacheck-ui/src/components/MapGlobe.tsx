@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Globe, { GlobeMethods } from "react-globe.gl";
 import { feature } from "topojson-client";
 import { geoCentroid, geoArea } from "d3-geo";
 import type { FeatureCollection, Feature, MultiPolygon, Polygon } from "geojson";
 import { mapSSE } from "../lib/api";
+import type { GeometryCollection, Topology } from "topojson-specification";
 
 /* ---------- типы точек/дуг (как у вас) ---------- */
 type Arc = {
@@ -26,10 +27,13 @@ type Dot = {
 };
 
 /* ---------- типы стран/подписей ---------- */
-type CountryFeature = Feature<
-  Polygon | MultiPolygon,
-  { name?: string; ADMIN?: string; name_long?: string }
->;
+type CountryProperties = { name?: string; ADMIN?: string; name_long?: string };
+
+type CountryFeature = Feature<Polygon | MultiPolygon, CountryProperties>;
+
+type CountriesTopology = Topology<{
+  countries: GeometryCollection;
+}>;
 
 type CountryLabel = {
   id: number;
@@ -53,6 +57,7 @@ export default function MapGlobe() {
 
   const [polygons, setPolygons] = useState<CountryFeature[]>([]);
   const [labelsAll, setLabelsAll] = useState<CountryLabel[]>([]);
+  const [visibleLabels, setVisibleLabels] = useState<CountryLabel[]>([]);
   const [arcs, setArcs] = useState<Arc[]>([]);
   const [points, setPoints] = useState<Dot[]>([]);
 
@@ -63,11 +68,12 @@ export default function MapGlobe() {
 
     fetch("https://unpkg.com/world-atlas@2.0.2/countries-110m.json")
       .then((r) => r.json())
-      .then((topo: any) => {
+      .then((topologyRaw: unknown) => {
+        const topo = topologyRaw as CountriesTopology;
         const fc = feature(
           topo,
           topo.objects.countries
-        ) as FeatureCollection<Polygon | MultiPolygon, any>;
+        ) as FeatureCollection<Polygon | MultiPolygon, CountryProperties>;
 
         const feats = fc.features as CountryFeature[];
         setPolygons(feats);
@@ -85,8 +91,9 @@ export default function MapGlobe() {
             if (!rawName) return null;
 
             // d3-гео: centroid => [lng, lat]
-            const c = geoCentroid(f as any);
-            const area = geoArea(f as any);
+            const featureGeometry = f as Feature<Polygon | MultiPolygon, CountryProperties>;
+            const c = geoCentroid(featureGeometry);
+            const area = geoArea(featureGeometry);
 
             return {
               id: i,
@@ -109,6 +116,19 @@ export default function MapGlobe() {
         // оффлайн — просто без подписей
       });
   }, []);
+
+  useEffect(() => {
+    const alt = camAltRef.current;
+
+    let take = 0;
+    if (alt > 2.2) take = 20;
+    else if (alt > 1.7) take = 45;
+    else if (alt > 1.4) take = 80;
+    else if (alt > 1.2) take = 120;
+    else take = 160;
+
+    setVisibleLabels(labelsAll.slice(0, take));
+  }, [labelsAll, tick]);
 
   /* ---------- простая SSE-логика (оставил как было) ---------- */
   useEffect(() => {
@@ -186,20 +206,6 @@ export default function MapGlobe() {
   }, []);
 
   /* ---------- динамический LOD для подписей (без лагов) ---------- */
-  const visibleLabels = useMemo(() => {
-    const alt = camAltRef.current;
-
-    // чем выше — тем меньше подписей
-    let take = 0;
-    if (alt > 2.2) take = 20;
-    else if (alt > 1.7) take = 45;
-    else if (alt > 1.4) take = 80;
-    else if (alt > 1.2) take = 120;
-    else take = 160;
-
-    return labelsAll.slice(0, take);
-  }, [labelsAll, tick]);
-
   // без setState на каждый zoom — только лёгкий "ping"
   const handleZoom = () => {
     const a = globeRef.current?.pointOfView()?.altitude;

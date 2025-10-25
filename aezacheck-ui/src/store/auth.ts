@@ -21,30 +21,26 @@ export const useAuth = create<AuthState>((set) => ({
   async login(email, password) {
     set({ loading: true, error: null });
     try {
-      const r = (await api.login(email, password)) as any;
-      if (!r || typeof r.access_token !== "string") {
-        throw new Error("Bad login response");
-      }
+      const r = await api.login(email, password);
       localStorage.setItem("access_token", r.access_token);
-      set({ user: r.user as User, loading: false });
-    } catch (e: any) {
-      set({ error: e?.message || "Login failed", loading: false });
-      throw e;
+      set({ user: r.user, loading: false });
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : "Login failed";
+      set({ error: message, loading: false });
+      throw (error instanceof Error ? error : new Error(message));
     }
   },
 
   async register(email, password) {
     set({ loading: true, error: null });
     try {
-      const r = (await api.register(email, password)) as any;
-      if (!r || typeof r.access_token !== "string") {
-        throw new Error("Bad register response");
-      }
+      const r = await api.register(email, password);
       localStorage.setItem("access_token", r.access_token);
-      set({ user: r.user as User, loading: false });
-    } catch (e: any) {
-      set({ error: e?.message || "Register failed", loading: false });
-      throw e;
+      set({ user: r.user, loading: false });
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : "Register failed";
+      set({ error: message, loading: false });
+      throw (error instanceof Error ? error : new Error(message));
     }
   },
 

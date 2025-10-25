@@ -16,3 +16,9 @@
   become: true
   roles:
     - services/go_app
+
+- name: Deploy API gateway
+  hosts: api_gw
+  become: true
+  roles:
+    - services/go_app

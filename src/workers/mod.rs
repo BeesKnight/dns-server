@@ -23,8 +23,13 @@ use crate::control_plane::{
 use crate::dispatcher::{DispatchQueues, DispatchedLease, LeaseAssignment};
 use crate::lease_extender::LeaseExtenderClient;
 
+mod ping;
 mod tcp;
 
+pub use ping::{
+    PingEngine, PingFailureReason, PingObservation, PingProbeOutcome, PingProtocol, PingRequest,
+    PingWorker,
+};
 pub use tcp::{TcpAttempt, TcpObservation, TcpWorker};
 
 /// Trait that exposes the set of supported task kinds.
@@ -536,27 +541,6 @@ impl WorkerHandler for HttpWorker {
         debug!(lease_id = lease.lease_id, kind = ?lease.kind, "processing HTTP lease");
         if token.is_cancelled() {
             debug!(lease_id = lease.lease_id, kind = ?lease.kind, "HTTP lease cancelled during processing");
-            return Ok(WorkerReport::cancelled(lease.lease_id));
-        }
-        Ok(WorkerReport::completed(lease.lease_id))
-    }
-}
-
-/// Default worker implementation for Ping checks.
-#[derive(Default)]
-pub struct PingWorker;
-
-#[async_trait]
-impl WorkerHandler for PingWorker {
-    async fn handle(&self, assignment: LeaseAssignment) -> Result<WorkerReport> {
-        let (lease, token) = assignment.into_parts();
-        if token.is_cancelled() {
-            debug!(lease_id = lease.lease_id, kind = ?lease.kind, "Ping lease cancelled before start");
-            return Ok(WorkerReport::cancelled(lease.lease_id));
-        }
-        debug!(lease_id = lease.lease_id, kind = ?lease.kind, "processing Ping lease");
-        if token.is_cancelled() {
-            debug!(lease_id = lease.lease_id, kind = ?lease.kind, "Ping lease cancelled during processing");
             return Ok(WorkerReport::cancelled(lease.lease_id));
         }
         Ok(WorkerReport::completed(lease.lease_id))

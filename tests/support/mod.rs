@@ -98,6 +98,9 @@ fn default_spec(id: u64, kind: TaskType) -> TaskSpec {
         TaskType::Ping => TaskSpec::Ping(codecrafters_dns_server::control_plane::PingSpec {
             host: "127.0.0.1".into(),
             count: Some(4),
+            interval_ms: None,
+            timeout_ms: None,
+            rate_limit_per_sec: None,
         }),
         TaskType::Trace => TaskSpec::Trace(codecrafters_dns_server::control_plane::TraceSpec {
             host: "127.0.0.1".into(),

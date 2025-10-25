@@ -37,6 +37,9 @@ fn dummy_spec(kind: TaskKind, id: u64) -> TaskSpec {
         TaskKind::Ping => TaskSpec::Ping(PingSpec {
             host: "127.0.0.1".into(),
             count: Some(3),
+            interval_ms: None,
+            timeout_ms: None,
+            rate_limit_per_sec: None,
         }),
         TaskKind::Trace => TaskSpec::Trace(TraceSpec {
             host: "127.0.0.1".into(),

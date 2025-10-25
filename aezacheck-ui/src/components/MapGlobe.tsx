@@ -4,26 +4,7 @@ import { feature } from "topojson-client";
 import { geoCentroid, geoArea } from "d3-geo";
 import type { FeatureCollection, Feature, MultiPolygon, Polygon } from "geojson";
 import { mapSSE } from "../lib/api";
-
-/* ---------- типы точек/дуг (как у вас) ---------- */
-type Arc = {
-  id: string;
-  startLat: number;
-  startLng: number;
-  endLat: number;
-  endLng: number;
-  color: string;
-  status: "running" | "ok" | "fail";
-};
-
-type Dot = {
-  id: string;
-  lat: number;
-  lng: number;
-  color: string;
-  size: number;
-  label?: string;
-};
+import type { Arc, Dot, WorkerCommand, WorkerResponse } from "../types/globe";
 
 /* ---------- типы стран/подписей ---------- */
 type CountryFeature = Feature<
@@ -46,20 +27,162 @@ const LAND_SIDE = "rgba(15, 23, 42, .92)";
 const LAND_STROKE = "rgba(56, 189, 248, .35)";
 const LABEL_COLOR = "rgba(226,232,240,.92)";
 
+const FPS_LOW_THRESHOLD = 28;
+const FPS_HIGH_THRESHOLD = 34;
+
 export default function MapGlobe() {
   const globeRef = useRef<GlobeMethods>();
-  const camAltRef = useRef(1.6);         // текущая высота камеры
-  const [tick, setTick] = useState(0);   // лёгкий триггер пересчёта LOD
+  const camAltRef = useRef(1.6); // текущая высота камеры
+  const [tick, setTick] = useState(0); // лёгкий триггер пересчёта LOD
 
   const [polygons, setPolygons] = useState<CountryFeature[]>([]);
   const [labelsAll, setLabelsAll] = useState<CountryLabel[]>([]);
   const [arcs, setArcs] = useState<Arc[]>([]);
   const [points, setPoints] = useState<Dot[]>([]);
+  const [fps, setFps] = useState(60);
+  const [performanceMode, setPerformanceMode] = useState(false);
+
+  const workerRef = useRef<Worker | null>(null);
+  const arcCacheRef = useRef(new Map<string, Arc>());
+  const pointCacheRef = useRef(new Map<string, Dot>());
+  const zoomRaf = useRef<number | null>(null);
+  const performanceModeRef = useRef(false);
 
   /* ---------- загрузка карт и расчёт подписей ---------- */
   useEffect(() => {
     // стартовая точка обзора
     globeRef.current?.pointOfView({ lat: 30, lng: 20, altitude: 1.6 }, 1200);
+
+    const worker = new Worker(new URL("../workers/globeWorker.ts", import.meta.url));
+    workerRef.current = worker;
+
+    const applyPointUpdates = (updates: Dot[]) => {
+      if (!updates.length) return;
+      setPoints((prev) => {
+        if (!prev.length && !updates.length) {
+          return prev;
+        }
+        const updateMap = new Map(updates.map((item) => [item.id, item]));
+        let changed = false;
+        const next = prev.map((item) => {
+          const candidate = updateMap.get(item.id);
+          if (!candidate) return item;
+          const cached = pointCacheRef.current.get(item.id);
+          const sameAsCurrent = shallowDotEqual(item, candidate);
+          if ((cached && shallowDotEqual(cached, candidate)) || sameAsCurrent) {
+            pointCacheRef.current.set(candidate.id, candidate);
+            updateMap.delete(item.id);
+            return item;
+          }
+          pointCacheRef.current.set(candidate.id, candidate);
+          updateMap.delete(item.id);
+          changed = true;
+          return candidate;
+        });
+
+        if (updateMap.size) {
+          changed = true;
+          updateMap.forEach((value) => {
+            pointCacheRef.current.set(value.id, value);
+            next.push(value);
+          });
+        }
+        return changed ? next : prev;
+      });
+    };
+
+    const removePoints = (ids: string[]) => {
+      if (!ids.length) return;
+      const removeSet = new Set(ids);
+      setPoints((prev) => {
+        if (!prev.length) return prev;
+        let changed = false;
+        const next = prev.filter((item) => {
+          if (removeSet.has(item.id)) {
+            pointCacheRef.current.delete(item.id);
+            changed = true;
+            return false;
+          }
+          return true;
+        });
+        return changed ? next : prev;
+      });
+    };
+
+    const applyArcUpdates = (updates: Arc[]) => {
+      if (!updates.length) return;
+      setArcs((prev) => {
+        const updateMap = new Map(updates.map((item) => [item.id, item]));
+        let changed = false;
+        const next = prev.map((item) => {
+          const candidate = updateMap.get(item.id);
+          if (!candidate) return item;
+          const cached = arcCacheRef.current.get(item.id);
+          const sameAsCurrent = shallowArcEqual(item, candidate);
+          if ((cached && shallowArcEqual(cached, candidate)) || sameAsCurrent) {
+            arcCacheRef.current.set(candidate.id, candidate);
+            updateMap.delete(item.id);
+            return item;
+          }
+          arcCacheRef.current.set(candidate.id, candidate);
+          updateMap.delete(item.id);
+          changed = true;
+          return candidate;
+        });
+
+        if (updateMap.size) {
+          changed = true;
+          updateMap.forEach((value) => {
+            arcCacheRef.current.set(value.id, value);
+            next.push(value);
+          });
+        }
+        return changed ? next : prev;
+      });
+    };
+
+    const removeArcs = (ids: string[]) => {
+      if (!ids.length) return;
+      const removeSet = new Set(ids);
+      setArcs((prev) => {
+        if (!prev.length) return prev;
+        let changed = false;
+        const next = prev.filter((item) => {
+          if (removeSet.has(item.id)) {
+            arcCacheRef.current.delete(item.id);
+            changed = true;
+            return false;
+          }
+          return true;
+        });
+        return changed ? next : prev;
+      });
+    };
+
+    const handleWorkerMessage = (event: MessageEvent<WorkerResponse>) => {
+      const payload = event.data;
+      if (!payload) return;
+      switch (payload.type) {
+        case "points:add":
+        case "points:update":
+          applyPointUpdates(payload.points);
+          break;
+        case "points:remove":
+          removePoints(payload.ids);
+          break;
+        case "arcs:add":
+        case "arcs:update":
+          applyArcUpdates(payload.arcs);
+          break;
+        case "arcs:remove":
+          removeArcs(payload.ids);
+          break;
+        default:
+          break;
+      }
+    };
+
+    worker.addEventListener("message", handleWorkerMessage);
 
     fetch("https://unpkg.com/world-atlas@2.0.2/countries-110m.json")
       .then((r) => r.json())
@@ -108,6 +231,12 @@ export default function MapGlobe() {
       .catch(() => {
         // оффлайн — просто без подписей
       });
+
+    return () => {
+      worker.removeEventListener("message", handleWorkerMessage);
+      worker.terminate();
+      workerRef.current = null;
+    };
   }, []);
 
   /* ---------- простая SSE-логика (оставил как было) ---------- */
@@ -115,67 +244,16 @@ export default function MapGlobe() {
     const es = mapSSE();
     es.onmessage = (ev) => {
       try {
-        const msg = JSON.parse(ev.data);
-        switch (msg.type) {
-          case "agent.online": {
-            const [lat, lng] = msg.data.geo;
-            setPoints((p) => [
-              ...p.filter((x) => x.id !== `ag:${msg.data.id}`),
-              {
-                id: `ag:${msg.data.id}`,
-                lat,
-                lng,
-                color: "#59a5ff",
-                size: 0.4,
-                label: `agent ${msg.data.ip}`,
-              },
-            ]);
-            break;
-          }
-          case "check.start": {
-            const { source, target, check_id } = msg.data;
-            const [slat, slng] = source.geo;
-            const [tlat, tlng] = target.geo;
-
-            setArcs((as) => [
-              ...as,
-              {
-                id: check_id,
-                startLat: slat,
-                startLng: slng,
-                endLat: tlat,
-                endLng: tlng,
-                color: "#9b5de5",
-                status: "running",
-              },
-            ]);
-            setPoints((p) => [
-              ...p,
-              { id: `s:${check_id}`, lat: slat, lng: slng, color: "#9b5de5", size: 0.5, label: "agent" },
-              { id: `t:${check_id}`, lat: tlat, lng: tlng, color: "#ffe66d", size: 0.5, label: target.host },
-            ]);
-            break;
-          }
-          case "check.done": {
-            const ok = !!msg.data.ok;
-            setArcs((as) =>
-              as.map((a) =>
-                a.id === msg.data.check_id
-                  ? { ...a, color: ok ? "#4ade80" : "#ef4444", status: ok ? "ok" : "fail" }
-                  : a
-              )
-            );
-            setTimeout(() => {
-              setPoints((p) =>
-                p.filter(
-                  (x) => !x.id.startsWith(`s:${msg.data.check_id}`) && !x.id.startsWith(`t:${msg.data.check_id}`)
-                )
-              );
-            }, 3000);
-            break;
-          }
-          default:
-            break;
+        const msg = JSON.parse(ev.data) as WorkerCommand;
+        workerRef.current?.postMessage(msg);
+        if (msg.type === "check.done") {
+          const checkId = msg.data.check_id;
+          setTimeout(() => {
+            workerRef.current?.postMessage({
+              type: "points.remove",
+              data: { ids: [`s:${checkId}`, `t:${checkId}`] },
+            } satisfies WorkerCommand);
+          }, 3000);
         }
       } catch {
         /* ignore */
@@ -183,6 +261,35 @@ export default function MapGlobe() {
     };
     es.onerror = () => {};
     return () => es.close();
+  }, []);
+
+  useEffect(() => {
+    let rafId: number;
+    let frameCount = 0;
+    let lastTime = performance.now();
+
+    const loop = (time: number) => {
+      frameCount += 1;
+      const delta = time - lastTime;
+      if (delta >= 500) {
+        const currentFps = (frameCount * 1000) / delta;
+        setFps(currentFps);
+        frameCount = 0;
+        lastTime = time;
+
+        if (!performanceModeRef.current && currentFps < FPS_LOW_THRESHOLD) {
+          performanceModeRef.current = true;
+          setPerformanceMode(true);
+        } else if (performanceModeRef.current && currentFps > FPS_HIGH_THRESHOLD) {
+          performanceModeRef.current = false;
+          setPerformanceMode(false);
+        }
+      }
+      rafId = requestAnimationFrame(loop);
+    };
+
+    rafId = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(rafId);
   }, []);
 
   /* ---------- динамический LOD для подписей (без лагов) ---------- */
@@ -214,7 +321,6 @@ export default function MapGlobe() {
       }
     }
   };
-  const zoomRaf = useRef<number | null>(null);
 
   /* ---------- размер шрифта от площади (без тяжёлых вычислений) ---------- */
   const labelSize = (d: CountryLabel) => {
@@ -228,17 +334,20 @@ export default function MapGlobe() {
   };
 
   return (
-    <div className="h-[70vh] md:h-[80vh] w-full">
+    <div className="relative h-[70vh] md:h-[80vh] w-full">
+      <div className="absolute right-4 top-4 rounded bg-slate-900/70 px-2 py-1 text-xs text-slate-200">
+        FPS: {fps.toFixed(0)} {performanceMode ? "(perf)" : ""}
+      </div>
       <Globe
         ref={globeRef}
         backgroundColor="rgba(0,0,0,0)"
 
         /* атмосфера и фон */
-        showAtmosphere
+        showAtmosphere={!performanceMode}
         atmosphereColor={SEA_GLOW}
-        atmosphereAltitude={0.25}
+        atmosphereAltitude={performanceMode ? 0.2 : 0.25}
         globeImageUrl="//unpkg.com/three-globe/example/img/earth-dark.jpg"
-        bumpImageUrl="//unpkg.com/three-globe/example/img/earth-topology.png"
+        bumpImageUrl={performanceMode ? undefined : "//unpkg.com/three-globe/example/img/earth-topology.png"}
 
         /* материки */
         polygonsData={polygons}
@@ -256,7 +365,7 @@ export default function MapGlobe() {
         labelSize={labelSize}
         labelColor={() => LABEL_COLOR}
         labelAltitude={0.03}
-        labelResolution={2}
+        labelResolution={performanceMode ? 1 : 2}
         labelIncludeDot={false}
 
         /* точки (агенты/цели) */
@@ -275,16 +384,37 @@ export default function MapGlobe() {
         arcEndLat={(d: Arc) => d.endLat}
         arcEndLng={(d: Arc) => d.endLng}
         arcColor={(d: Arc) => d.color}
-        arcAltitude={0.25}
-        arcStroke={0.6}
-        arcDashLength={0.45}
-        arcDashGap={0.2}
-        arcDashAnimateTime={1600}
+        arcAltitude={performanceMode ? 0.18 : 0.25}
+        arcStroke={performanceMode ? 0.45 : 0.6}
+        arcDashLength={performanceMode ? 0 : 0.45}
+        arcDashGap={performanceMode ? 0 : 0.2}
+        arcDashAnimateTime={performanceMode ? 0 : 1600}
 
         /* интерактив */
         enablePointerInteraction={true}
         onZoom={handleZoom}
       />
     </div>
+  );
+}
+
+function shallowArcEqual(a: Arc, b: Arc) {
+  return (
+    a.startLat === b.startLat &&
+    a.startLng === b.startLng &&
+    a.endLat === b.endLat &&
+    a.endLng === b.endLng &&
+    a.color === b.color &&
+    a.status === b.status
+  );
+}
+
+function shallowDotEqual(a: Dot, b: Dot) {
+  return (
+    a.lat === b.lat &&
+    a.lng === b.lng &&
+    a.color === b.color &&
+    a.size === b.size &&
+    a.label === b.label
   );
 }

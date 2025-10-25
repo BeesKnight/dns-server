@@ -1,0 +1,72 @@
+name: Rust backend CI
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+      - 'src/**'
+      - 'tests/**'
+      - '.github/workflows/rust.yml'
+  pull_request:
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+      - 'src/**'
+      - 'tests/**'
+      - '.github/workflows/rust.yml'
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libssl-dev curl
+
+      - name: Set up Rust toolchain
+        run: |
+          set -euxo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          fi
+          source "$HOME/.cargo/env"
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup component add clippy rustfmt
+
+      - name: Check formatting
+        run: |
+          set -euxo pipefail
+          source "$HOME/.cargo/env"
+          cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: |
+          set -euxo pipefail
+          source "$HOME/.cargo/env"
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Run tests
+        run: |
+          set -euxo pipefail
+          source "$HOME/.cargo/env"
+          cargo test --workspace --all-targets --all-features
+
+      - name: Build release artifacts
+        run: |
+          set -euxo pipefail
+          source "$HOME/.cargo/env"
+          cargo build --workspace --release

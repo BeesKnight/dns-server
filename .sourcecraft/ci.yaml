@@ -1,0 +1,260 @@
+version: 1
+
+workflows:
+  rust:
+    name: Rust backend CI
+    triggers:
+      push:
+        branches:
+          - main
+        changes:
+          - Cargo.toml
+          - Cargo.lock
+          - build.rs
+          - src/**
+          - tests/**
+          - .sourcecraft/pipeline.yaml
+      merge_request:
+        changes:
+          - Cargo.toml
+          - Cargo.lock
+          - build.rs
+          - src/**
+          - tests/**
+          - .sourcecraft/pipeline.yaml
+    agent:
+      machine:
+        image: ubuntu-22.04
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Checkout
+        uses: sourcecraft/checkout@v1
+
+      - name: Install system dependencies
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libssl-dev curl
+
+      - name: Set up Rust toolchain
+        run: |
+          set -euxo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          fi
+          source "$HOME/.cargo/env"
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup component add clippy rustfmt
+
+      - name: Check formatting
+        run: |
+          set -euxo pipefail
+          source "$HOME/.cargo/env"
+          cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: |
+          set -euxo pipefail
+          source "$HOME/.cargo/env"
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Run tests
+        run: |
+          set -euxo pipefail
+          source "$HOME/.cargo/env"
+          cargo test --workspace --all-targets --all-features
+
+      - name: Build release artifacts
+        run: |
+          set -euxo pipefail
+          source "$HOME/.cargo/env"
+          cargo build --workspace --release
+
+  frontend:
+    name: Frontend quality checks
+    triggers:
+      push:
+        branches:
+          - main
+        changes:
+          - aezacheck-ui/**
+          - .sourcecraft/pipeline.yaml
+      merge_request:
+        changes:
+          - aezacheck-ui/**
+          - .sourcecraft/pipeline.yaml
+    agent:
+      machine:
+        image: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: sourcecraft/checkout@v1
+
+      - name: Set up Node.js 20
+        run: |
+          set -euxo pipefail
+          curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+          sudo apt-get update
+          sudo apt-get install -y nodejs
+          node --version
+          npm --version
+
+      - name: Install dependencies
+        run: |
+          set -euxo pipefail
+          cd aezacheck-ui
+          npm ci
+
+      - name: Run lint
+        run: |
+          set -euxo pipefail
+          cd aezacheck-ui
+          npm run lint
+
+      - name: Build frontend
+        run: |
+          set -euxo pipefail
+          cd aezacheck-ui
+          npm run build
+
+  ansible:
+    name: Ansible lint and dry-run
+    triggers:
+      push:
+        branches:
+          - main
+        changes:
+          - playbooks/**
+          - inventories/**
+          - group_vars/**
+          - infra/**
+          - ansible.cfg
+          - requirements-ansible.txt
+          - Makefile
+          - .sourcecraft/pipeline.yaml
+      merge_request:
+        changes:
+          - playbooks/**
+          - inventories/**
+          - group_vars/**
+          - infra/**
+          - ansible.cfg
+          - requirements-ansible.txt
+          - Makefile
+          - .sourcecraft/pipeline.yaml
+    agent:
+      machine:
+        image: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: sourcecraft/checkout@v1
+
+      - name: Set up Python tooling
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y python3 python3-venv python3-pip
+          python3 -m venv .venv
+          . .venv/bin/activate
+          python -m pip install --upgrade pip
+          pip install 'ansible>=9.0.0' 'ansible-lint>=24.2.0' yamllint
+          if [ -f requirements-ansible.txt ]; then
+            pip install -r requirements-ansible.txt
+          fi
+
+      - name: YAML lint
+        run: |
+          set -euxo pipefail
+          . .venv/bin/activate
+          cat <<'YAML' > .yamllint.yml
+---
+extends: default
+rules:
+  line-length:
+    max: 160
+    level: warning
+YAML
+          yamllint -c .yamllint.yml playbooks group_vars infra
+
+      - name: Run ansible-lint
+        run: |
+          set -euxo pipefail
+          . .venv/bin/activate
+          ansible-lint playbooks
+
+      - name: Validate playbooks (syntax check)
+        run: |
+          set -euxo pipefail
+          . .venv/bin/activate
+          for inventory in inventories/*; do
+            if [ -d "$inventory" ]; then
+              ansible-playbook -i "$inventory" playbooks/site.yml --syntax-check
+            fi
+          done
+
+      - name: Dry-run inventories
+        run: |
+          set -euxo pipefail
+          . .venv/bin/activate
+          for inventory in inventories/*; do
+            if [ -d "$inventory" ]; then
+              ansible-playbook -i "$inventory" playbooks/site.yml --check -e orchestration_skip_deploy=true
+            fi
+          done
+
+  go-services:
+    name: Go services CI
+    triggers:
+      push:
+        branches:
+          - main
+        changes:
+          - dev/**
+          - .sourcecraft/pipeline.yaml
+      merge_request:
+        changes:
+          - dev/**
+          - .sourcecraft/pipeline.yaml
+    agent:
+      machine:
+        image: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: sourcecraft/checkout@v1
+
+      - name: Install Go 1.23
+        run: |
+          set -euxo pipefail
+          sudo rm -rf /usr/local/go
+          curl -fsSL https://go.dev/dl/go1.23.3.linux-amd64.tar.gz -o /tmp/go.tar.gz
+          sudo tar -C /usr/local -xzf /tmp/go.tar.gz
+          rm /tmp/go.tar.gz
+          /usr/local/go/bin/go version
+
+      - name: Lint and test Go services
+        run: |
+          set -euxo pipefail
+          export PATH="/usr/local/go/bin:$PATH"
+          export GOMODCACHE="$HOME/.cache/go-build/mod"
+          export GOCACHE="$HOME/.cache/go-build"
+          mkdir -p "$GOMODCACHE" "$GOCACHE"
+          for module in dev/*; do
+            if [ -f "$module/go.mod" ]; then
+              echo "Checking $module"
+              mapfile -t gofiles < <(find "$module" -type f -name '*.go')
+              if [ "${#gofiles[@]}" -gt 0 ]; then
+                unformatted=$(gofmt -l "${gofiles[@]}")
+                if [ -n "$unformatted" ]; then
+                  echo "The following Go files are not formatted:" >&2
+                  echo "$unformatted" >&2
+                  exit 1
+                fi
+              fi
+              (cd "$module" && go mod verify)
+              (cd "$module" && go vet ./...)
+              (cd "$module" && go test ./...)
+              (cd "$module" && go build ./...)
+            fi
+          done

@@ -1,0 +1,56 @@
+name: Go services CI
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'dev/**'
+      - '.github/workflows/go.yml'
+  pull_request:
+    paths:
+      - 'dev/**'
+      - '.github/workflows/go.yml'
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Go 1.23
+        run: |
+          set -euxo pipefail
+          sudo rm -rf /usr/local/go
+          curl -fsSL https://go.dev/dl/go1.23.3.linux-amd64.tar.gz -o /tmp/go.tar.gz
+          sudo tar -C /usr/local -xzf /tmp/go.tar.gz
+          rm /tmp/go.tar.gz
+          /usr/local/go/bin/go version
+
+      - name: Lint and test Go services
+        run: |
+          set -euxo pipefail
+          export PATH="/usr/local/go/bin:$PATH"
+          export GOMODCACHE="$HOME/.cache/go-build/mod"
+          export GOCACHE="$HOME/.cache/go-build"
+          mkdir -p "$GOMODCACHE" "$GOCACHE"
+          for module in dev/*; do
+            if [ -f "$module/go.mod" ]; then
+              echo "Checking $module"
+              mapfile -t gofiles < <(find "$module" -type f -name '*.go')
+              if [ "${#gofiles[@]}" -gt 0 ]; then
+                unformatted=$(gofmt -l "${gofiles[@]}")
+                if [ -n "$unformatted" ]; then
+                  echo "The following Go files are not formatted:" >&2
+                  echo "$unformatted" >&2
+                  exit 1
+                fi
+              fi
+              (cd "$module" && go mod verify)
+              (cd "$module" && go vet ./...)
+              (cd "$module" && go test ./...)
+              (cd "$module" && go build ./...)
+            fi
+          done

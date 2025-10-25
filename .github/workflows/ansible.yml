@@ -2,12 +2,15 @@ name: Ansible orchestration
 
 on:
   push:
+    branches:
+      - main
     paths:
       - 'playbooks/**'
       - 'inventories/**'
       - 'group_vars/**'
-      - 'infra/roles/**'
+      - 'infra/**'
       - 'ansible.cfg'
+      - 'requirements-ansible.txt'
       - 'Makefile'
       - '.github/workflows/ansible.yml'
   pull_request:
@@ -15,8 +18,9 @@ on:
       - 'playbooks/**'
       - 'inventories/**'
       - 'group_vars/**'
-      - 'infra/roles/**'
+      - 'infra/**'
       - 'ansible.cfg'
+      - 'requirements-ansible.txt'
       - 'Makefile'
       - '.github/workflows/ansible.yml'
 
@@ -34,13 +38,53 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install Ansible tooling
+      - name: Prepare Ansible tooling
         run: |
+          set -euxo pipefail
+          python -m venv .venv
+          . .venv/bin/activate
           python -m pip install --upgrade pip
-          pip install 'ansible>=9.0.0' 'ansible-lint>=24.2.0'
+          pip install 'ansible>=9.0.0' 'ansible-lint>=24.2.0' yamllint
+          if [ -f requirements-ansible.txt ]; then
+            pip install -r requirements-ansible.txt
+          fi
+
+      - name: YAML lint
+        run: |
+          set -euxo pipefail
+          . .venv/bin/activate
+          cat <<'YAML' > .yamllint.yml
+---
+extends: default
+rules:
+  line-length:
+    max: 160
+    level: warning
+YAML
+          yamllint -c .yamllint.yml playbooks group_vars infra
 
       - name: Run ansible-lint
-        run: ansible-lint playbooks/site.yml
+        run: |
+          set -euxo pipefail
+          . .venv/bin/activate
+          ansible-lint playbooks
 
-      - name: Dry-run local inventory
-        run: ansible-playbook -i inventories/local playbooks/site.yml --check -e orchestration_skip_deploy=true
+      - name: Validate playbooks (syntax check)
+        run: |
+          set -euxo pipefail
+          . .venv/bin/activate
+          for inventory in inventories/*; do
+            if [ -d "$inventory" ]; then
+              ansible-playbook -i "$inventory" playbooks/site.yml --syntax-check
+            fi
+          done
+
+      - name: Dry-run inventories
+        run: |
+          set -euxo pipefail
+          . .venv/bin/activate
+          for inventory in inventories/*; do
+            if [ -d "$inventory" ]; then
+              ansible-playbook -i "$inventory" playbooks/site.yml --check -e orchestration_skip_deploy=true
+            fi
+          done

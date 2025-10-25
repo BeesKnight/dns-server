@@ -1,0 +1,48 @@
+name: Frontend quality checks
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'aezacheck-ui/**'
+      - '.github/workflows/frontend.yml'
+  pull_request:
+    paths:
+      - 'aezacheck-ui/**'
+      - '.github/workflows/frontend.yml'
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        run: |
+          set -euxo pipefail
+          curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+          sudo apt-get update
+          sudo apt-get install -y nodejs
+          node --version
+          npm --version
+
+      - name: Install dependencies
+        run: |
+          set -euxo pipefail
+          cd aezacheck-ui
+          npm ci
+
+      - name: Run lint
+        run: |
+          set -euxo pipefail
+          cd aezacheck-ui
+          npm run lint
+
+      - name: Build frontend
+        run: |
+          set -euxo pipefail
+          cd aezacheck-ui
+          npm run build

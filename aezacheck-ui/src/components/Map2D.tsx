@@ -1,5 +1,5 @@
 // src/components/Map2D.tsx
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   MouseEvent as ReactMouseEvent,
   PointerEvent as ReactPointerEvent,
@@ -28,6 +28,8 @@ const ATTACK_LIFETIME_MS = 2000;
 
 type WorldFeature = Feature<Polygon | MultiPolygon, { NAME?: string; name?: string }>;
 type Attack = { id: number; from: [number, number]; to: [number, number]; };
+
+type ViewTransform = { x: number; y: number; k: number };
 
 type NetworkNode = {
   id: string;
@@ -262,7 +264,7 @@ export default function Map2D({ offsetTop = 0 }: Props) {
   const idRef = useRef(0);
   const [nodeDensity, setNodeDensity] = useState(0.9);
   const [speedMultiplier, setSpeedMultiplier] = useState(1);
-  const [viewTransform, setViewTransform] = useState({ x: 0, y: 0, k: 1 });
+  const [viewTransform, setViewTransform] = useState<ViewTransform>({ x: 0, y: 0, k: 1 });
   const [isPanning, setIsPanning] = useState(false);
   const panStateRef = useRef<{
     pointerId: number | null;
@@ -327,6 +329,80 @@ export default function Map2D({ offsetTop = 0 }: Props) {
 
   const path = useMemo(() => geoPath(projection), [projection]);
   const graticule = useMemo(() => geoGraticule10(), []);
+
+  const worldBounds = useMemo(() => {
+    if (!worldFc) return null;
+    const [[minX, minY], [maxX, maxY]] = path.bounds(worldFc);
+    if (
+      !Number.isFinite(minX) ||
+      !Number.isFinite(minY) ||
+      !Number.isFinite(maxX) ||
+      !Number.isFinite(maxY)
+    ) {
+      return null;
+    }
+    return { minX, minY, maxX, maxY };
+  }, [worldFc, path]);
+
+  const clampViewTransform = useCallback(
+    (next: ViewTransform): ViewTransform => {
+      const sanitized: ViewTransform = {
+        x: Number.isFinite(next.x) ? next.x : 0,
+        y: Number.isFinite(next.y) ? next.y : 0,
+        k: Number.isFinite(next.k) && next.k > 0 ? next.k : 1
+      };
+
+      if (!worldBounds || w <= 0 || h <= 0) {
+        return sanitized;
+      }
+
+      const margin = Math.min(w, h) * 0.08 + 24;
+      const minXBound = margin - sanitized.k * worldBounds.minX;
+      const maxXBound = w - margin - sanitized.k * worldBounds.maxX;
+      const minYBound = margin - sanitized.k * worldBounds.minY;
+      const maxYBound = h - margin - sanitized.k * worldBounds.maxY;
+
+      const clampValue = (value: number, min: number, max: number) => {
+        if (min > max) {
+          return (min + max) / 2;
+        }
+        if (!Number.isFinite(value)) {
+          return (min + max) / 2;
+        }
+        return Math.min(Math.max(value, min), max);
+      };
+
+      return {
+        x: clampValue(sanitized.x, minXBound, maxXBound),
+        y: clampValue(sanitized.y, minYBound, maxYBound),
+        k: sanitized.k
+      };
+    },
+    [worldBounds, w, h]
+  );
+
+  const updateViewTransform = useCallback(
+    (updater: (prev: ViewTransform) => ViewTransform) => {
+      setViewTransform((prev) => {
+        const next = clampViewTransform(updater(prev));
+        if (next.x === prev.x && next.y === prev.y && next.k === prev.k) {
+          return prev;
+        }
+        return next;
+      });
+    },
+    [clampViewTransform]
+  );
+
+  useEffect(() => {
+    setViewTransform((prev) => {
+      const next = clampViewTransform(prev);
+      if (next.x === prev.x && next.y === prev.y && next.k === prev.k) {
+        return prev;
+      }
+      return next;
+    });
+  }, [clampViewTransform]);
 
   const sortedNodes = useMemo(() => [...BASE_NODES].sort((a, b) => b.importance - a.importance), []);
   const visibleNodes = useMemo(() => {
@@ -430,8 +506,11 @@ export default function Map2D({ offsetTop = 0 }: Props) {
     const zoomFactor = delta > 0 ? 0.9 : 1.1;
     const minZoom = 0.75;
     const maxZoom = 4.5;
-    setViewTransform((prev) => {
+    updateViewTransform((prev) => {
       const nextK = Math.max(minZoom, Math.min(maxZoom, prev.k * zoomFactor));
+      if (nextK === prev.k) {
+        return prev;
+      }
       const ratio = nextK / prev.k;
       const rect = e.currentTarget.getBoundingClientRect();
       const pointerX = e.clientX - rect.left;
@@ -463,7 +542,7 @@ export default function Map2D({ offsetTop = 0 }: Props) {
     if (panState.pointerId !== null) {
       const dx = e.clientX - panState.startX;
       const dy = e.clientY - panState.startY;
-      setViewTransform((prev) => ({ ...prev, x: panState.originX + dx, y: panState.originY + dy }));
+      updateViewTransform((prev) => ({ x: panState.originX + dx, y: panState.originY + dy, k: prev.k }));
     }
   };
 

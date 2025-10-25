@@ -14,7 +14,7 @@ use futures::future::{BoxFuture, FutureExt};
 use tokio::runtime::Builder;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinHandle, JoinSet};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 
 use crate::concurrency::{ConcurrencyController, ConcurrencyLimits};
 use crate::control_plane::{
@@ -25,12 +25,17 @@ use crate::lease_extender::LeaseExtenderClient;
 
 mod ping;
 mod tcp;
+mod trace;
 
 pub use ping::{
     PingEngine, PingFailureReason, PingObservation, PingProbeOutcome, PingProtocol, PingRequest,
     PingWorker,
 };
 pub use tcp::{TcpAttempt, TcpObservation, TcpWorker};
+pub use trace::{
+    ParisFlowId, RawSocketCapability, TraceEngine, TraceHop, TraceObservation, TraceProbeOutcome,
+    TraceProbeRequest, TraceProtocol, TraceStatus, TraceWorker,
+};
 
 /// Trait that exposes the set of supported task kinds.
 trait TaskKindExt {
@@ -541,27 +546,6 @@ impl WorkerHandler for HttpWorker {
         debug!(lease_id = lease.lease_id, kind = ?lease.kind, "processing HTTP lease");
         if token.is_cancelled() {
             debug!(lease_id = lease.lease_id, kind = ?lease.kind, "HTTP lease cancelled during processing");
-            return Ok(WorkerReport::cancelled(lease.lease_id));
-        }
-        Ok(WorkerReport::completed(lease.lease_id))
-    }
-}
-
-/// Default worker implementation for Traceroute checks.
-#[derive(Default)]
-pub struct TraceWorker;
-
-#[async_trait]
-impl WorkerHandler for TraceWorker {
-    async fn handle(&self, assignment: LeaseAssignment) -> Result<WorkerReport> {
-        let (lease, token) = assignment.into_parts();
-        if token.is_cancelled() {
-            info!(lease_id = lease.lease_id, kind = ?lease.kind, "Trace lease cancelled before start");
-            return Ok(WorkerReport::cancelled(lease.lease_id));
-        }
-        info!(lease_id = lease.lease_id, kind = ?lease.kind, "processing Trace lease");
-        if token.is_cancelled() {
-            info!(lease_id = lease.lease_id, kind = ?lease.kind, "Trace lease cancelled during processing");
             return Ok(WorkerReport::cancelled(lease.lease_id));
         }
         Ok(WorkerReport::completed(lease.lease_id))

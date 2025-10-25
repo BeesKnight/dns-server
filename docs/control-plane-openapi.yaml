@@ -1,0 +1,648 @@
+openapi: 3.0.3
+info:
+  title: API control plane агента DNS
+  version: "1.0.0"
+  description: |
+    Публичный HTTP+JSON API для координации DNS-агентов с control plane.
+    Контракты согласованы с командой фронтенда 2024-07-02.
+servers:
+  - url: https://control-plane.example.com/api/v1
+    description: Продакшен
+  - url: https://staging-control-plane.example.com/api/v1
+    description: Стейджинг
+security:
+  - AgentAuth: []
+paths:
+  /register:
+    post:
+      summary: Зарегистрировать экземпляр агента
+      operationId: registerAgent
+      description: |
+        Регистрирует нового агента или обновляет существующую запись. Вызов
+        идемпотентен для каждого hostname: повторные запросы обновляют
+        сохранённые метаданные и ротируют токен аутентификации.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        "200":
+          description: Регистрация принята
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegisterResponse'
+        "400":
+          $ref: '#/components/responses/ValidationError'
+        "409":
+          $ref: '#/components/responses/ConflictError'
+        "500":
+          $ref: '#/components/responses/BackendError'
+  /heartbeat:
+    post:
+      summary: Обновить дедлайн heartbeat-а
+      operationId: heartbeat
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HeartbeatRequest'
+      responses:
+        "200":
+          description: Heartbeat подтверждён
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HeartbeatResponse'
+        "401":
+          $ref: '#/components/responses/UnauthorizedError'
+        "429":
+          $ref: '#/components/responses/RateLimitError'
+        "500":
+          $ref: '#/components/responses/BackendError'
+  /claim:
+    post:
+      summary: Получить доступные аренды задач
+      operationId: claimLeases
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClaimRequest'
+      responses:
+        "200":
+          description: Пакет аренд выдан
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClaimResponse'
+        "401":
+          $ref: '#/components/responses/UnauthorizedError'
+        "404":
+          $ref: '#/components/responses/NotFoundError'
+        "429":
+          $ref: '#/components/responses/RateLimitError'
+        "500":
+          $ref: '#/components/responses/BackendError'
+  /extend:
+    post:
+      summary: Продлить активные аренды
+      operationId: extendLeases
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExtendRequest'
+      responses:
+        "200":
+          description: Возвращены результаты продления
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  outcomes:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ExtendOutcome'
+                  revoked:
+                    type: array
+                    items:
+                      type: integer
+                      format: int64
+                required:
+                  - outcomes
+                  - revoked
+        "401":
+          $ref: '#/components/responses/UnauthorizedError'
+        "404":
+          $ref: '#/components/responses/NotFoundError'
+        "429":
+          $ref: '#/components/responses/RateLimitError'
+        "500":
+          $ref: '#/components/responses/BackendError'
+  /report:
+    post:
+      summary: Отправить результаты выполнения аренды
+      operationId: reportLeases
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReportRequest'
+      responses:
+        "200":
+          description: Отчёты приняты
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReportResponse'
+        "401":
+          $ref: '#/components/responses/UnauthorizedError'
+        "404":
+          $ref: '#/components/responses/NotFoundError'
+        "429":
+          $ref: '#/components/responses/RateLimitError'
+        "500":
+          $ref: '#/components/responses/BackendError'
+  /metrics:
+    post:
+      summary: Принять агрегированные метрики агента
+      operationId: ingestMetrics
+      description: |
+        Позволяет агентам отправлять периодические эксплуатационные метрики,
+        не связанные с отчётами по задачам. Предназначено для агрегированных
+        счётчиков и датчиков.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MetricsEnvelope'
+      responses:
+        "202":
+          description: Метрики приняты к обработке
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accepted:
+                    type: boolean
+                  id:
+                    type: string
+                    description: Идентификатор, созданный сервером для трассировки
+                required:
+                  - accepted
+        "400":
+          $ref: '#/components/responses/ValidationError'
+        "401":
+          $ref: '#/components/responses/UnauthorizedError'
+        "429":
+          $ref: '#/components/responses/RateLimitError'
+        "500":
+          $ref: '#/components/responses/BackendError'
+  /config:
+    get:
+      summary: Получить последнюю конфигурацию агента
+      operationId: fetchConfig
+      parameters:
+        - in: header
+          name: If-None-Match
+          schema:
+            type: string
+          required: false
+          description: Последняя полученная ревизия конфигурации (аналог ETag)
+      responses:
+        "200":
+          description: Конфигурация доставлена
+          headers:
+            ETag:
+              schema:
+                type: string
+              description: Идентификатор ревизии для последующих условных запросов
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentConfigEnvelope'
+        "304":
+          description: Конфигурация не изменилась
+        "401":
+          $ref: '#/components/responses/UnauthorizedError'
+        "404":
+          $ref: '#/components/responses/NotFoundError'
+        "429":
+          $ref: '#/components/responses/RateLimitError'
+        "500":
+          $ref: '#/components/responses/BackendError'
+components:
+  securitySchemes:
+    AgentAuth:
+      type: apiKey
+      in: header
+      name: X-Agent-Token
+      description: Добавляйте заголовки X-Agent-Token и X-Agent-Id в каждый запрос.
+  schemas:
+    RegisterRequest:
+      type: object
+      properties:
+        hostname:
+          type: string
+          maxLength: 255
+          description: Необязательное имя хоста, сообщаемое агентом
+      required: []
+    RegisterResponse:
+      type: object
+      properties:
+        agent_id:
+          type: integer
+          format: int64
+        lease_duration_ms:
+          type: integer
+          format: int64
+        heartbeat_timeout_ms:
+          type: integer
+          format: int64
+        auth_token:
+          type: string
+      required:
+        - agent_id
+        - lease_duration_ms
+        - heartbeat_timeout_ms
+        - auth_token
+    HeartbeatRequest:
+      type: object
+      properties:
+        agent_id:
+          type: integer
+          format: int64
+      required:
+        - agent_id
+    HeartbeatResponse:
+      type: object
+      properties:
+        agent_id:
+          type: integer
+          format: int64
+        next_deadline_ms:
+          type: integer
+          format: int64
+      required:
+        - agent_id
+        - next_deadline_ms
+    ClaimRequest:
+      type: object
+      properties:
+        agent_id:
+          type: integer
+          format: int64
+        capacities:
+          type: object
+          additionalProperties:
+            type: integer
+            minimum: 0
+          description: Бюджет параллелизма для каждого типа задач
+      required:
+        - agent_id
+        - capacities
+    ClaimResponse:
+      type: object
+      properties:
+        leases:
+          type: array
+          items:
+            $ref: '#/components/schemas/Lease'
+      required:
+        - leases
+    TaskKind:
+      type: string
+      enum: [dns, http, tcp, ping, trace]
+    TaskSpec:
+      oneOf:
+        - type: object
+          required: [kind, query]
+          properties:
+            kind:
+              type: string
+              enum: [dns]
+            query:
+              type: string
+            server:
+              type: string
+              nullable: true
+        - type: object
+          required: [kind, url]
+          properties:
+            kind:
+              type: string
+              enum: [http]
+            url:
+              type: string
+              format: uri
+            method:
+              type: string
+              nullable: true
+        - $ref: '#/components/schemas/TcpSpec'
+        - $ref: '#/components/schemas/PingSpec'
+        - $ref: '#/components/schemas/TraceSpec'
+      discriminator:
+        propertyName: kind
+    TcpSpec:
+      type: object
+      required: [kind, host, port]
+      properties:
+        kind:
+          type: string
+          enum: [tcp]
+        host:
+          type: string
+        port:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 65535
+    PingSpec:
+      type: object
+      required: [kind, host]
+      properties:
+        kind:
+          type: string
+          enum: [ping]
+        host:
+          type: string
+        count:
+          type: integer
+          format: int32
+          minimum: 1
+          nullable: true
+        interval_ms:
+          type: integer
+          format: int64
+          nullable: true
+        timeout_ms:
+          type: integer
+          format: int64
+          nullable: true
+        rate_limit_per_sec:
+          type: integer
+          format: int32
+          nullable: true
+    TraceSpec:
+      type: object
+      required: [kind, host]
+      properties:
+        kind:
+          type: string
+          enum: [trace]
+        host:
+          type: string
+        max_hops:
+          type: integer
+          format: int32
+          nullable: true
+    Lease:
+      type: object
+      properties:
+        lease_id:
+          type: integer
+          format: int64
+        task_id:
+          type: integer
+          format: int64
+        kind:
+          $ref: '#/components/schemas/TaskKind'
+        lease_until_ms:
+          type: integer
+          format: int64
+        spec:
+          $ref: '#/components/schemas/TaskSpec'
+      required:
+        - lease_id
+        - task_id
+        - kind
+        - lease_until_ms
+        - spec
+    ExtendRequest:
+      type: object
+      properties:
+        agent_id:
+          type: integer
+          format: int64
+        lease_ids:
+          type: array
+          items:
+            type: integer
+            format: int64
+        extend_by_ms:
+          type: integer
+          format: int64
+      required:
+        - agent_id
+        - lease_ids
+        - extend_by_ms
+    ExtendOutcome:
+      type: object
+      properties:
+        lease_id:
+          type: integer
+          format: int64
+        new_deadline_ms:
+          type: integer
+          format: int64
+      required:
+        - lease_id
+        - new_deadline_ms
+    Observation:
+      type: object
+      properties:
+        name:
+          type: string
+        value:
+          oneOf:
+            - type: number
+            - type: integer
+            - type: boolean
+            - type: string
+            - type: object
+            - type: array
+        unit:
+          type: string
+          nullable: true
+      required:
+        - name
+        - value
+    LeaseReport:
+      type: object
+      properties:
+        lease_id:
+          type: integer
+          format: int64
+        observations:
+          type: array
+          items:
+            $ref: '#/components/schemas/Observation'
+      required:
+        - lease_id
+    ReportRequest:
+      type: object
+      properties:
+        agent_id:
+          type: integer
+          format: int64
+        completed:
+          type: array
+          items:
+            $ref: '#/components/schemas/LeaseReport'
+        cancelled:
+          type: array
+          items:
+            $ref: '#/components/schemas/LeaseReport'
+      required:
+        - agent_id
+        - completed
+        - cancelled
+    ReportResponse:
+      type: object
+      properties:
+        acknowledged:
+          type: integer
+          format: int32
+      required:
+        - acknowledged
+    MetricsEnvelope:
+      type: object
+      properties:
+        agent_id:
+          type: integer
+          format: int64
+        timestamp:
+          type: string
+          format: date-time
+        counters:
+          type: array
+          items:
+            $ref: '#/components/schemas/MetricSample'
+        gauges:
+          type: array
+          items:
+            $ref: '#/components/schemas/MetricSample'
+      required:
+        - agent_id
+        - timestamp
+    MetricSample:
+      type: object
+      properties:
+        name:
+          type: string
+        value:
+          type: number
+        unit:
+          type: string
+          nullable: true
+      required:
+        - name
+        - value
+    AgentConfigEnvelope:
+      type: object
+      properties:
+        revision:
+          type: string
+        issued_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        config:
+          type: object
+          additionalProperties: true
+        signature:
+          type: string
+          description: Отдельная подпись для проверки целостности
+      required:
+        - revision
+        - issued_at
+        - expires_at
+        - config
+        - signature
+    ErrorEnvelope:
+      type: object
+      properties:
+        error:
+          type: string
+        message:
+          type: string
+        retryable:
+          type: boolean
+        details:
+          type: object
+          additionalProperties: true
+          nullable: true
+      required:
+        - error
+        - message
+        - retryable
+  responses:
+    ValidationError:
+      description: Проверка полезной нагрузки завершилась ошибкой
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          examples:
+            invalidLeaseId:
+              value:
+                error: ERR_VALIDATION
+                message: lease_ids должны быть положительными целыми числами
+                retryable: false
+    UnauthorizedError:
+      description: Требуется аутентификация или токен недействителен
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          examples:
+            expired:
+              value:
+                error: ERR_UNAUTHORIZED
+                message: токен истёк, выполните повторную регистрацию
+                retryable: false
+    NotFoundError:
+      description: Запрошенный ресурс не существует
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          examples:
+            lease:
+              value:
+                error: ERR_NOT_FOUND
+                message: аренда 12345 не найдена
+                retryable: false
+    ConflictError:
+      description: Конфликт с текущим состоянием
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          examples:
+            duplicate:
+              value:
+                error: ERR_CONFLICT
+                message: агент уже зарегистрирован для этого hostname
+                retryable: false
+    RateLimitError:
+      description: Превышен лимит запросов
+      headers:
+        Retry-After:
+          schema:
+            type: string
+            description: Время в секундах или HTTP-дата, после которых можно повторить запрос
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          examples:
+            burst:
+              value:
+                error: ERR_RATE_LIMITED
+                message: превышен лимит heartbeat
+                retryable: true
+    BackendError:
+      description: Внутренняя ошибка backend-а
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          examples:
+            transient:
+              value:
+                error: ERR_BACKEND
+                message: верхний источник данных недоступен
+                retryable: true

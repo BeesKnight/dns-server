@@ -23,6 +23,10 @@ use crate::control_plane::{
 use crate::dispatcher::{DispatchQueues, DispatchedLease, LeaseAssignment};
 use crate::lease_extender::LeaseExtenderClient;
 
+mod tcp;
+
+pub use tcp::{TcpAttempt, TcpObservation, TcpWorker};
+
 /// Trait that exposes the set of supported task kinds.
 trait TaskKindExt {
     const ALL: [TaskKind; 5];
@@ -201,14 +205,21 @@ impl WorkerReport {
         self
     }
 
-    pub fn with_observation(mut self, lease_id: u64, observation: Observation) -> Self {
+    pub fn with_observation(self, lease_id: u64, observation: Observation) -> Self {
+        self.with_observations(lease_id, std::iter::once(observation))
+    }
+
+    pub fn with_observations<I>(mut self, lease_id: u64, observations: I) -> Self
+    where
+        I: IntoIterator<Item = Observation>,
+    {
         if let Some(entry) = self
             .completed
             .iter_mut()
             .chain(self.cancelled.iter_mut())
             .find(|entry| entry.lease_id == lease_id)
         {
-            entry.observations.push(observation);
+            entry.observations.extend(observations);
         }
         self
     }
@@ -525,27 +536,6 @@ impl WorkerHandler for HttpWorker {
         debug!(lease_id = lease.lease_id, kind = ?lease.kind, "processing HTTP lease");
         if token.is_cancelled() {
             debug!(lease_id = lease.lease_id, kind = ?lease.kind, "HTTP lease cancelled during processing");
-            return Ok(WorkerReport::cancelled(lease.lease_id));
-        }
-        Ok(WorkerReport::completed(lease.lease_id))
-    }
-}
-
-/// Default worker implementation for TCP checks.
-#[derive(Default)]
-pub struct TcpWorker;
-
-#[async_trait]
-impl WorkerHandler for TcpWorker {
-    async fn handle(&self, assignment: LeaseAssignment) -> Result<WorkerReport> {
-        let (lease, token) = assignment.into_parts();
-        if token.is_cancelled() {
-            debug!(lease_id = lease.lease_id, kind = ?lease.kind, "TCP lease cancelled before start");
-            return Ok(WorkerReport::cancelled(lease.lease_id));
-        }
-        debug!(lease_id = lease.lease_id, kind = ?lease.kind, "processing TCP lease");
-        if token.is_cancelled() {
-            debug!(lease_id = lease.lease_id, kind = ?lease.kind, "TCP lease cancelled during processing");
             return Ok(WorkerReport::cancelled(lease.lease_id));
         }
         Ok(WorkerReport::completed(lease.lease_id))

@@ -91,6 +91,7 @@ impl BytePacketBuf {
         Ok(&self.buf[start..start + len])
     }
 
+    #[allow(dead_code)]
     fn set_to_pos(&mut self, pos: usize) -> Result<()> {
         self.ensure_capacity(pos)?;
         self.pos = pos;
@@ -500,7 +501,7 @@ impl From<Flags> for u16 {
 #[repr(u8)]
 
 // попробовать вытаскивать по дискриминанту с ансейфом - смотреть обсидиан
-enum Opcode {
+pub enum Opcode {
     Query,
     IQuery,
     Status,
@@ -600,6 +601,7 @@ impl Question {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct ResourceRecord {
     name: String,

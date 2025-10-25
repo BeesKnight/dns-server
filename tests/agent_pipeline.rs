@@ -1,8 +1,14 @@
 mod support;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use codecrafters_dns_server::control_plane::{Lease, LeaseReport, TaskKind, TaskSpec, TcpSpec};
+use codecrafters_dns_server::dispatcher::{spawn_dispatcher, DispatcherConfig, LeaseAssignment};
+use codecrafters_dns_server::workers::{
+    spawn_worker_pools, ReportSink, TcpWorker, WorkerHandlers, WorkerPoolsConfig,
+};
 use support::{build_tasks, AgentPipeline, AgentPipelineConfig, MockBackend, TaskType};
 
 include!(concat!(env!("OUT_DIR"), "/worker_test_macro.rs"));
@@ -196,6 +202,11 @@ worker_test!(load_metrics_with_thousands_of_tasks, {
     );
 });
 
+use tokio::net::TcpListener;
+use tokio::sync::Mutex;
+use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
+
 worker_test!(pipeline_handles_backend_cancellation, {
     let (backend, control, driver) = MockBackend::new();
 
@@ -240,3 +251,110 @@ worker_test!(pipeline_handles_backend_cancellation, {
     assert_eq!(stats.total_completed(), 0, "no task should complete");
     assert!(snapshot.active_leases.is_empty());
 });
+
+worker_test!(pipeline_tcp_worker_produces_observations, {
+    let dispatcher_config = DispatcherConfig::default();
+    let (ingress, queues, dispatcher_handle) = spawn_dispatcher(dispatcher_config);
+
+    let reporter = CollectingReporter::default();
+    let mut handlers = WorkerHandlers::default();
+    handlers.tcp = Arc::new(TcpWorker::default());
+
+    let pools = spawn_worker_pools(
+        WorkerPoolsConfig::new(),
+        queues,
+        handlers,
+        reporter.clone(),
+        None,
+    )
+    .expect("spawn worker pools");
+
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("bind tcp listener");
+    let port = listener.local_addr().expect("listener address").port();
+    let accept = tokio::spawn(async move {
+        if let Ok((socket, _)) = listener.accept().await {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            drop(socket);
+        }
+    });
+
+    let lease = Lease {
+        lease_id: 900,
+        task_id: 900,
+        kind: TaskKind::Tcp,
+        lease_until_ms: 0,
+        spec: TaskSpec::Tcp(TcpSpec {
+            host: "localhost".into(),
+            port,
+        }),
+    };
+    let token = CancellationToken::new();
+    let assignment = LeaseAssignment::new(lease, token);
+
+    ingress.dispatch(assignment).await.expect("dispatch lease");
+    reporter.wait_for_completed(1, Duration::from_secs(2)).await;
+
+    drop(ingress);
+    pools.shutdown().await;
+    dispatcher_handle.shutdown().await;
+    accept.await.expect("listener task completes");
+
+    let reports = reporter.completed_reports_async().await;
+    assert_eq!(reports.len(), 1, "expected one completed report");
+    assert!(
+        reports[0]
+            .observations
+            .iter()
+            .any(|obs| obs.name == "tcp_summary"),
+        "tcp summary observation should be reported",
+    );
+});
+
+#[derive(Clone, Default)]
+struct CollectingReporter {
+    inner: Arc<CollectingReporterInner>,
+}
+
+#[derive(Default)]
+struct CollectingReporterInner {
+    completed: Mutex<Vec<LeaseReport>>,
+    notify: Notify,
+}
+
+#[async_trait::async_trait]
+impl ReportSink for CollectingReporter {
+    async fn report(
+        &self,
+        completed: Vec<LeaseReport>,
+        _cancelled: Vec<LeaseReport>,
+    ) -> anyhow::Result<()> {
+        if !completed.is_empty() {
+            let mut guard = self.inner.completed.lock().await;
+            guard.extend(completed);
+            self.inner.notify.notify_waiters();
+        }
+        Ok(())
+    }
+}
+
+impl CollectingReporter {
+    async fn wait_for_completed(&self, expected: usize, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            {
+                let guard = self.inner.completed.lock().await;
+                if guard.len() >= expected {
+                    return;
+                }
+            }
+            self.inner.notify.notified().await;
+        }
+        panic!("timed out waiting for completed reports");
+    }
+
+    async fn completed_reports_async(&self) -> Vec<LeaseReport> {
+        self.inner.completed.lock().await.clone()
+    }
+}

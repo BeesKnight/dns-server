@@ -16,9 +16,11 @@ use codecrafters_dns_server::control_plane::{
 };
 use codecrafters_dns_server::dispatcher::{spawn_dispatcher, DispatcherConfig, LeaseAssignment};
 use codecrafters_dns_server::workers::{
-    spawn_worker_pools, ReportSink, WorkerHandler, WorkerHandlers, WorkerPoolsConfig, WorkerReport,
+    spawn_worker_pools, ReportSink, TcpWorker, WorkerHandler, WorkerHandlers, WorkerPoolsConfig,
+    WorkerReport,
 };
 use serde_json::json;
+use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 include!(concat!(env!("OUT_DIR"), "/worker_test_macro.rs"));
@@ -181,6 +183,101 @@ worker_test!(worker_reports_cancellation, {
     assert_eq!(reports[0].observations[0].name, "cancelled");
     let completed = reporter.completed_async().await;
     assert!(completed.is_empty());
+});
+
+worker_test!(tcp_worker_happy_eyeballs_fallback, {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("bind tcp listener");
+    let port = listener.local_addr().expect("listener address").port();
+    let accept = tokio::spawn(async move {
+        if let Ok((socket, _)) = listener.accept().await {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            drop(socket);
+        }
+    });
+
+    let lease = Lease {
+        lease_id: 700,
+        task_id: 700,
+        kind: TaskKind::Tcp,
+        lease_until_ms: 0,
+        spec: TaskSpec::Tcp(TcpSpec {
+            host: "localhost".into(),
+            port,
+        }),
+    };
+    let token = CancellationToken::new();
+    let assignment = LeaseAssignment::new(lease, token);
+
+    let worker = TcpWorker::default();
+    let report = worker
+        .handle(assignment)
+        .await
+        .expect("tcp worker completed");
+
+    let (completed, cancelled) = report.into_parts();
+    assert!(cancelled.is_empty(), "tcp lease should not be cancelled");
+    assert_eq!(completed.len(), 1, "expected a single completed lease");
+    let observations = &completed[0].observations;
+    assert!(
+        observations
+            .iter()
+            .any(|obs| obs.name == "tcp_attempt" && obs.value["success"].as_bool() == Some(true)),
+        "successful attempt should be recorded",
+    );
+    assert!(
+        observations
+            .iter()
+            .any(|obs| obs.name == "tcp_attempt" && obs.value["success"].as_bool() == Some(false)),
+        "fallback attempt should record a failure",
+    );
+    let summary = observations
+        .iter()
+        .find(|obs| obs.name == "tcp_summary")
+        .expect("summary observation present");
+    assert_eq!(summary.value["success"].as_bool(), Some(true));
+    let expected_address = format!("127.0.0.1:{port}");
+    assert_eq!(
+        summary.value["address"].as_str(),
+        Some(expected_address.as_str()),
+        "expected IPv4 address in summary",
+    );
+    accept.await.expect("listener task completes");
+});
+
+worker_test!(tcp_worker_reports_cancellation_summary, {
+    let worker = TcpWorker::default();
+    let lease = Lease {
+        lease_id: 701,
+        task_id: 701,
+        kind: TaskKind::Tcp,
+        lease_until_ms: 0,
+        spec: TaskSpec::Tcp(TcpSpec {
+            host: "127.0.0.1".into(),
+            port: 9,
+        }),
+    };
+    let token = CancellationToken::new();
+    token.cancel();
+    let assignment = LeaseAssignment::new(lease, token);
+
+    let report = worker
+        .handle(assignment)
+        .await
+        .expect("tcp worker cancellation");
+    let (completed, cancelled) = report.into_parts();
+    assert!(
+        completed.is_empty(),
+        "cancelled lease should not be completed"
+    );
+    assert_eq!(cancelled.len(), 1, "expected cancelled lease entry");
+    let observations = &cancelled[0].observations;
+    let summary = observations
+        .iter()
+        .find(|obs| obs.name == "tcp_summary")
+        .expect("summary observation");
+    assert_eq!(summary.value["cancelled"].as_bool(), Some(true));
 });
 
 #[derive(Clone, Default)]

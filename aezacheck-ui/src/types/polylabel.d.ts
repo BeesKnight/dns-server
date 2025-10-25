@@ -1,8 +1,9 @@
-declare module 'polylabel' {
-  type Point = [number, number];
+declare module '@mapbox/polylabel' {
+  type Ring = number[][];
+  type Polygon = Ring[];
   export default function polylabel(
-    polygon: Point[][] | Point[][][],
+    polygon: Polygon | Polygon[],
     precision?: number,
     debug?: boolean
-  ): Point;
+  ): [number, number];
 }

@@ -10,9 +10,11 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@mapbox/polylabel": "^1.0.2",
     "d3-geo": "^3.1.1",
     "framer-motion": "^12.23.24",
     "lucide-react": "^0.548.0",
+    "ol": "^10.6.1",
     "polylabel": "^2.0.1",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",

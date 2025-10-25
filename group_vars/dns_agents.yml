@@ -1,0 +1,12 @@
+---
+# Runtime configuration for DNS agents
+
+dns_agent_max_inflight: "{{ performance.dns_agent_max_inflight }}"
+dns_agent_dns_upstream_timeout_ms: 1500
+telemetry_loki_endpoint: "{{ telemetry_defaults.loki_endpoint }}"
+telemetry_metrics_redis_url: "{{ telemetry_defaults.metrics_redis_url }}"
+telemetry_metrics_redis_queue: "{{ telemetry_defaults.metrics_redis_queue }}"
+telemetry_jobs_database_dsn: "{{ telemetry_defaults.jobs_database_dsn }}"
+telemetry_enable_alerts: "{{ telemetry_defaults.enable_alerts }}"
+telemetry_jobs_heartbeat_threshold_seconds: "{{ telemetry_defaults.jobs_heartbeat_threshold_seconds }}"
+telemetry_prometheus_rules_dir: "{{ telemetry_defaults.prometheus_rules_dir }}"

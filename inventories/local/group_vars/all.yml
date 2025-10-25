@@ -1,0 +1,31 @@
+---
+# Local development defaults
+
+orchestration_skip_deploy: true
+
+network:
+  postgres:
+    host: 127.0.0.1
+    port: 55432
+  redis:
+    host: 127.0.0.1
+    port: 56379
+  api_gateway:
+    host: 127.0.0.1
+    http_port: 8088
+  dns_agents:
+    health_port: 19053
+  services_subnet: 127.0.0.0/8
+
+performance:
+  go_app_memory_default: 256M
+  go_app_cpu_quota_default: "40%"
+  redis_maxmemory: 512m
+  postgres_shared_buffers: 256MB
+  dns_agent_max_inflight: 1024
+
+secrets:
+  postgres_password: devpostgres
+  redis_password: devredis
+  jwt_signing_key: local-secret
+  jobs_maxmind_license_key: ""

@@ -1,0 +1,68 @@
+---
+# Top-level orchestration entrypoint for the DNS platform
+
+- name: Provision PostgreSQL infrastructure
+  hosts: database
+  become: true
+  gather_facts: false
+  roles:
+    - role: infra/postgres
+      when: not orchestration_skip_deploy
+      tags: ["infra", "postgres"]
+
+- name: Provision Redis infrastructure
+  hosts: cache
+  become: true
+  gather_facts: false
+  roles:
+    - role: infra/redis
+      when: not orchestration_skip_deploy
+      tags: ["infra", "redis"]
+
+- name: Deploy authentication service
+  hosts: auth_svc
+  become: true
+  gather_facts: false
+  roles:
+    - role: services/auth-svc
+      when: not orchestration_skip_deploy
+      tags: ["services", "auth"]
+
+- name: Deploy sites service
+  hosts: sites_svc
+  become: true
+  gather_facts: false
+  roles:
+    - role: services/sites-svc
+      when: not orchestration_skip_deploy
+      tags: ["services", "sites"]
+
+- name: Deploy background jobs service
+  hosts: jobs_svc
+  become: true
+  gather_facts: false
+  roles:
+    - role: geoip
+      when: not orchestration_skip_deploy
+      tags: ["services", "geoip"]
+    - role: services/jobs-svc
+      when: not orchestration_skip_deploy
+      tags: ["services", "jobs"]
+
+- name: Deploy API gateway
+  hosts: api_gw
+  become: true
+  gather_facts: false
+  roles:
+    - role: services/api-gw
+      when: not orchestration_skip_deploy
+      tags: ["services", "gateway"]
+
+- name: Deploy DNS agents
+  hosts: dns_agents
+  become: true
+  gather_facts: false
+  roles:
+    - role: services/dns_agent
+      when: not orchestration_skip_deploy
+      tags: ["services", "dns"]

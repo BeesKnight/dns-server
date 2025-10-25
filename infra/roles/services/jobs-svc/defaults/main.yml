@@ -1,0 +1,7 @@
+---
+# Default configuration for the jobs service wrapper role
+
+go_app_service_name: jobs-svc
+go_app_binary_name: "{{ go_app_service_name }}"
+go_app_src_dir: "/srv/aezacheck/{{ go_app_service_name }}"
+go_app_systemd_unit: "{{ go_app_service_name }}.service"

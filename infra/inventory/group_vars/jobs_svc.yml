@@ -4,12 +4,19 @@
 go_app_service_name: jobs-svc
 go_app_src_dir: /srv/aezacheck/jobs-svc
 go_app_binary_name: jobs-svc
+jobs_claim_block_ms: 20000
+jobs_lease_ttl: 90s
+jobs_default_max_parallel: 4
 go_app_env_map:
   APP_URL: https://jobs.aezacheck.internal
   JWT_SECRET: "changeme-jobs"
   REDIS_URL: redis://redis:6379/2
   GEOIP_ENDPOINT: https://geoip.aezacheck.internal
   QUEUE_NAME: default
+  STREAM_TASKS: "{{ STREAM_TASKS }}"
+  CLAIM_BLOCK_MS: "{{ jobs_claim_block_ms }}"
+  LEASE_TTL: "{{ jobs_lease_ttl }}"
+  DEFAULT_MAX_PARALLEL: "{{ jobs_default_max_parallel }}"
 go_app_exec_args:
   - serve
   - --config

@@ -7,3 +7,4 @@ redis_bind_address: 0.0.0.0
 redis_port: "{{ REDIS_PORT | default(6379) }}"
 redis_password: "{{ REDIS_PASSWORD | default('') }}"
 redis_appendonly: 'yes'
+redis_maxmemory_policy: 'noeviction'

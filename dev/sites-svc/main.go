@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -703,9 +704,11 @@ func (a *App) handleCreateChecks(w http.ResponseWriter, r *http.Request) {
 
 		taskID := uuid.New()
 		val := map[string]interface{}{"task_id": taskID.String(), "check_id": checkID.String(), "kind": kind, "spec": string(spec)}
-		if _, err := a.redis.XAdd(r.Context(), &redis.XAddArgs{Stream: a.cfg.StreamTasks, Values: val}).Result(); err != nil {
+		if id, err := a.redis.XAdd(r.Context(), &redis.XAddArgs{Stream: a.cfg.StreamTasks, Values: val}).Result(); err != nil {
 			skipped = append(skipped, fmt.Sprintf("%s:xadd_err", kind))
 			continue
+		} else {
+			a.observeTaskStreamWrite(r.Context(), a.cfg.StreamTasks, id, kind)
 		}
 		queued = append(queued, kind)
 	}
@@ -913,6 +916,36 @@ func (a *App) publishCheckUpdate(ctx context.Context, checkID uuid.UUID, typ str
 	b, _ := json.Marshal(env)
 	channel := fmt.Sprintf("check-upd:%s", checkID.String())
 	return a.redis.Publish(ctx, channel, string(b)).Err()
+}
+
+/*************** Monitoring ***************/
+func streamIDTime(id string) (time.Time, bool) {
+	parts := strings.SplitN(id, "-", 2)
+	if len(parts) == 0 {
+		return time.Time{}, false
+	}
+	ms, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return time.UnixMilli(ms), true
+}
+
+func (a *App) observeTaskStreamWrite(ctx context.Context, stream, id, kind string) {
+	length, err := a.redis.XLen(ctx, stream).Result()
+	if err != nil {
+		a.log.Warn("stream_write_metrics", "stream", stream, "source", "enqueue", "kind", kind, "err", err)
+		return
+	}
+	var lagMs int64
+	if ts, ok := streamIDTime(id); ok {
+		lag := time.Since(ts)
+		if lag < 0 {
+			lag = 0
+		}
+		lagMs = lag.Milliseconds()
+	}
+	a.log.Info("stream_write", "stream", stream, "source", "enqueue", "kind", kind, "id", id, "stream_length", length, "lag_ms", lagMs)
 }
 
 /*************** misc ***************/

@@ -10,6 +10,7 @@ go_app_env_map:
   REDIS_URL: redis://redis:6379/1
   GEOIP_ENDPOINT: https://geoip.aezacheck.internal
   CACHE_TTL: "300"
+  STREAM_TASKS: "{{ STREAM_TASKS }}"
 go_app_exec_args:
   - serve
   - --config

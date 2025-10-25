@@ -4,6 +4,12 @@
 go_app_service_name: jobs-svc
 go_app_src_dir: /srv/aezacheck/jobs-svc
 go_app_binary_name: jobs-svc
+go_app_build_command: go build .
+go_app_binary_source: "{{ go_app_src_dir }}/jobs-svc"
+go_app_exec_start: "{{ go_app_release_dir }}/{{ go_app_binary_name }}"
+go_app_exec_args: []
+go_app_migrate_command: ""
+
 jobs_claim_block_ms: 20000
 jobs_lease_ttl: 90s
 jobs_default_max_parallel: 4
@@ -11,23 +17,24 @@ jobs_default_max_parallel: 4
 # MaxMind license key is expected to be provided via environment when running Ansible.
 geoip_maxmind_license_key: "{{ lookup('env', 'MAXMIND_LICENSE_KEY') | default('', true) }}"
 go_app_env_map:
-  APP_URL: https://jobs.aezacheck.internal
-  JWT_SECRET: "changeme-jobs"
-  REDIS_URL: redis://redis:6379/2
-  GEOIP_ENDPOINT: https://geoip.aezacheck.internal
-  GEOIP_DISABLED: "false"
-  GEOIP_CITY_PATH: "{{ geoip_data_dir }}/GeoLite2-City.mmdb"
-  GEOIP_ASN_PATH: "{{ geoip_data_dir }}/GeoLite2-ASN.mmdb"
-  QUEUE_NAME: default
+  HTTP_ADDR: 0.0.0.0:8082
+  DATABASE_URL: postgres://postgres:dev@postgres:5432/aezacheck?sslmode=disable
+  REDIS_ADDR: redis:6379
+  REDIS_PASSWORD: ""
   STREAM_TASKS: "{{ STREAM_TASKS }}"
   CLAIM_BLOCK_MS: "{{ jobs_claim_block_ms }}"
   LEASE_TTL: "{{ jobs_lease_ttl }}"
+  MAX_RETRIES: "3"
+  RETRY_BACKOFF: 5s
   DEFAULT_MAX_PARALLEL: "{{ jobs_default_max_parallel }}"
-go_app_exec_args:
-  - serve
-  - --config
-  - "{{ go_app_config_path }}"
-go_app_migrate_command: "{{ go_app_release_dir }}/{{ go_app_binary_name }} migrate --config {{ go_app_config_path }}"
+  CACHE_TTL: 30s
+  PUB_PREFIX: check-upd:
+  MAP_PUB_CHANNEL: map:events
+  MAP_STREAM: map_events
+  MAP_STREAM_MAXLEN: "100000"
+  GEOIP_DISABLED: "false"
+  GEOIP_CITY_PATH: "{{ geoip_data_dir }}/GeoLite2-City.mmdb"
+  GEOIP_ASN_PATH: "{{ geoip_data_dir }}/GeoLite2-ASN.mmdb"
 go_app_memory_limit: 1G
 go_app_cpu_quota: 95%
 go_app_database_name: jobs_db

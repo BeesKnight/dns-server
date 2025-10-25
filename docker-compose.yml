@@ -41,7 +41,7 @@ services:
     ports: ["8081:8081"]
 
   jobs-svc:
-    build: { context: ., dockerfile: ./dev/jobs-svc/Dockerfile }
+    build: { context: ., dockerfile: ./services/jobs-svc/Dockerfile }
     env_file: [ ./.env.shared, ./.env.jobs ]
     depends_on:
       postgres: { condition: service_healthy }

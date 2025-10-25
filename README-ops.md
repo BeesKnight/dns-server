@@ -82,6 +82,12 @@ Shared configuration is described in `group_vars/all.yml`. It contains:
 * Performance tuning knobs consumed across roles.
 * Default telemetry endpoints for the DNS agents.
 
+The production jobs control plane now builds from `services/jobs-svc` and is
+configured entirely through environment variables rendered by
+`group_vars/jobs_svc.yml` (and its inventory overrides). The Ansible role uses
+`go build .` and deploys the single binary with migrations embedded, so no
+separate `migrate` command is required.【F:group_vars/jobs_svc.yml†L5-L35】【F:infra/inventory/group_vars/jobs_svc.yml†L5-L35】【F:services/jobs-svc/migrate.go†L11-L71】
+
 All sensitive values must be stored in the encrypted
 `group_vars/all/vault.yml` file. Environments can override any of the variables
 by adding additional files under `inventories/<env>/group_vars/`.

@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::future::pending;
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::time::{self, Instant};
@@ -69,9 +70,9 @@ impl PartialEq for ScheduledTimer {
 
 impl Ord for ScheduledTimer {
     fn cmp(&self, other: &Self) -> Ordering {
-        match self.when.cmp(&other.when) {
-            Ordering::Equal => self.id.cmp(&other.id),
-            other => other,
+        match other.when.cmp(&self.when) {
+            Ordering::Equal => other.id.cmp(&self.id),
+            order => order,
         }
     }
 }
@@ -130,35 +131,32 @@ impl Drop for TimerInner {
 
 fn run_timer_worker(mut rx: mpsc::UnboundedReceiver<Command>) {
     tokio::spawn(async move {
-        let mut queue = BinaryHeap::new();
-
+        let mut queue: BinaryHeap<ScheduledTimer> = BinaryHeap::new();
         loop {
-            if queue.is_empty() {
-                match rx.recv().await {
-                    Some(Command::Schedule(timer)) => {
-                        queue.push(timer);
-                        update_depth_metric(queue.len());
-                        maybe_warn_depth(queue.len());
-                    }
-                    Some(Command::Shutdown) | None => break,
-                }
-                continue;
-            }
+            let next_deadline = queue.peek().map(|timer| timer.when);
+            let mut sleep = next_deadline.map(|deadline| Box::pin(time::sleep_until(deadline)));
 
-            let deadline = queue
-                .peek()
-                .map(|entry| entry.when)
-                .unwrap_or_else(Instant::now);
-            let recv = time::timeout_at(deadline, rx.recv()).await;
-            match recv {
-                Ok(Some(Command::Schedule(timer))) => {
-                    queue.push(timer);
-                    update_depth_metric(queue.len());
-                    maybe_warn_depth(queue.len());
+            tokio::select! {
+                _ = async {
+                    if let Some(sleep) = sleep.as_mut() {
+                        sleep.await;
+                    } else {
+                        pending::<()>().await;
+                    }
+                } => {
+                    if sleep.is_some() {
+                        fire_due(&mut queue).await;
+                    }
                 }
-                Ok(Some(Command::Shutdown)) | Ok(None) => break,
-                Err(_) => {
-                    fire_due(&mut queue).await;
+                cmd = rx.recv() => {
+                    match cmd {
+                        Some(Command::Schedule(timer)) => {
+                            queue.push(timer);
+                            update_depth_metric(queue.len());
+                            maybe_warn_depth(queue.len());
+                        }
+                        Some(Command::Shutdown) | None => break,
+                    }
                 }
             }
         }
@@ -203,4 +201,31 @@ fn maybe_warn_depth(depth: usize) {
 
 fn update_depth_metric(depth: usize) {
     metrics::gauge!("timer.queue_depth").set(depth as f64);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+
+    #[tokio::test]
+    async fn timer_fires_with_virtual_time() {
+        tokio::time::pause();
+        let timer = TimerService::new();
+        let fired = Arc::new(AtomicBool::new(false));
+        let fired_clone2 = fired.clone();
+        tokio::spawn(async move {
+            timer.sleep(Duration::from_millis(40)).await.unwrap();
+            fired_clone2.store(true, AtomicOrdering::SeqCst);
+        });
+        tokio::task::yield_now().await;
+
+        tokio::time::advance(Duration::from_millis(30)).await;
+        tokio::task::yield_now().await;
+        assert!(!fired.load(AtomicOrdering::SeqCst));
+
+        tokio::time::advance(Duration::from_millis(20)).await;
+        tokio::task::yield_now().await;
+        assert!(fired.load(AtomicOrdering::SeqCst));
+    }
 }

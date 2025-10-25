@@ -138,15 +138,19 @@ impl DnsResolver {
                     self.cache.insert(key.clone(), Arc::clone(resolution)).await;
                     let cache = self.cache.clone();
                     let key_for_task = key.clone();
+                    let key_for_log = key.clone();
                     let ttl = resolution.ttl;
                     let timer = self.timer.clone();
-                    tokio::spawn(async move {
-                        if timer.sleep(ttl).await.is_ok() {
-                            cache.invalidate(&key_for_task).await;
-                        } else {
-                            warn!(key = %key_for_task, "ttl eviction timer shut down before firing");
-                        }
-                    });
+                    let invalidate = async move {
+                        cache.invalidate(&key_for_task).await;
+                    };
+                    if let Err(err) = timer.schedule(ttl, invalidate) {
+                        warn!(
+                            key = %key_for_log,
+                            error = %err,
+                            "failed to schedule ttl eviction timer"
+                        );
+                    }
                 }
             }
 

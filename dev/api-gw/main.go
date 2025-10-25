@@ -232,10 +232,36 @@ func newProxy(base string) (*httputil.ReverseProxy, error) {
 	}
 	rp := httputil.NewSingleHostReverseProxy(u)
 	rp.Director = func(req *http.Request) {
+		originalHost := req.Host
 		req.URL.Scheme = u.Scheme
 		req.URL.Host = u.Host
 		req.Host = u.Host
-		req.Header.Set("X-Forwarded-Host", req.Host)
+		if originalHost != "" {
+			req.Header.Set("X-Forwarded-Host", originalHost)
+		}
+		remoteIP := strings.TrimSpace(req.RemoteAddr)
+		if host, _, err := net.SplitHostPort(req.RemoteAddr); err == nil {
+			remoteIP = host
+		}
+		if remoteIP != "" {
+			xff := strings.TrimSpace(req.Header.Get("X-Forwarded-For"))
+			if xff != "" {
+				parts := strings.Split(xff, ",")
+				last := strings.TrimSpace(parts[len(parts)-1])
+				if last != remoteIP {
+					xff = xff + ", " + remoteIP
+				}
+			} else {
+				xff = remoteIP
+			}
+			req.Header.Set("X-Forwarded-For", xff)
+			if strings.TrimSpace(req.Header.Get("X-Real-IP")) == "" {
+				client := strings.TrimSpace(strings.Split(xff, ",")[0])
+				if client != "" {
+					req.Header.Set("X-Real-IP", client)
+				}
+			}
+		}
 		if xf := req.Header.Get("X-Forwarded-Proto"); xf == "" {
 			if req.TLS != nil {
 				req.Header.Set("X-Forwarded-Proto", "https")

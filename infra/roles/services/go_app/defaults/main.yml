@@ -41,6 +41,16 @@ go_app_systemd_unit: "{{ go_app_service_name }}.service"
 go_app_env_template: "env.j2"
 go_app_systemd_template: "go-app.service.j2"
 
+# Dependencies for the systemd unit
+go_app_unit_after:
+  - network.target
+  - postgresql.service
+  - redis.service
+
+go_app_unit_wants:
+  - postgresql.service
+  - redis.service
+
 # Runtime configuration path passed to the application
 go_app_config_path: "{{ go_app_release_dir }}/config.yaml"
 
@@ -57,6 +67,9 @@ go_app_migrate_command: "{{ go_app_release_dir }}/{{ go_app_binary_name }} migra
 # Resource limits for the systemd unit
 go_app_memory_limit: "512M"
 go_app_cpu_quota: "80%"
+
+# Maximum number of open files allowed for the service (optional)
+go_app_limit_nofile: null
 
 # Database information used to enable pgcrypto extension (optional)
 go_app_database_name: null

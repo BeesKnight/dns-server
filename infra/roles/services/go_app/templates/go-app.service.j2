@@ -1,8 +1,8 @@
 # Managed by Ansible - systemd unit for {{ go_app_service_name }}
 [Unit]
 Description={{ go_app_service_name }} service
-After=network.target postgresql.service redis.service
-Wants=postgresql.service redis.service
+After={{ go_app_unit_after | join(' ') }}
+Wants={{ go_app_unit_wants | join(' ') }}
 
 [Service]
 Type=simple
@@ -14,7 +14,11 @@ RestartSec=5s
 MemoryMax={{ go_app_memory_limit }}
 CPUQuota={{ go_app_cpu_quota }}
 WorkingDirectory={{ go_app_release_dir }}
-{% for key, value in go_app_systemd_extra.items() %}{{ key }}={{ value }}
+{% if go_app_limit_nofile is not none %}
+LimitNOFILE={{ go_app_limit_nofile }}
+{% endif %}
+{% for key, value in go_app_systemd_extra.items() %}
+{{ key }}={{ value }}
 {% endfor %}
 
 [Install]

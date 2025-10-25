@@ -540,62 +540,106 @@ func (a *App) handleClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ctx := r.Context()
 	block := time.Duration(a.cfg.ClaimBlockMs) * time.Millisecond
-	args := &redis.XReadArgs{Streams: []string{a.cfg.StreamTasks, "$"}, Count: int64(requested), Block: block}
-	res, err := a.redis.XRead(r.Context(), args).Result()
-	if err != nil && !errors.Is(err, redis.Nil) {
-		http.Error(w, "queue error", http.StatusBadGateway)
-		return
-	}
-	if len(res) == 0 || len(res[0].Messages) == 0 {
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-
-	messages := res[0].Messages
-	a.observeStreamRead(r.Context(), a.cfg.StreamTasks, requested, messages)
 
 	var leases []leaseDTO
-	for _, msg := range messages {
-		taskID := uuidFromAny(msg.Values["task_id"])
-		checkID := uuidFromAny(msg.Values["check_id"])
-		kind := strFromAny(msg.Values["kind"])
-		spec := []byte(strFromAny(msg.Values["spec"]))
-		if taskID == uuid.Nil || checkID == uuid.Nil || kind == "" || len(spec) == 0 {
-			continue
-		}
-		lockKey := leaseKey(msg.ID)
-		ok, err := a.redis.SetNX(r.Context(), lockKey, ag.ID.String(), a.cfg.LeaseTTL).Result()
-		if err != nil || !ok {
-			continue
-		}
-		var (
-			leaseID     uuid.UUID
-			leaseExtID  int64
-			leasedUntil time.Time
-		)
-		err = a.pool.QueryRow(r.Context(),
-			`insert into leases(agent_id,check_id,task_id,kind,spec,stream_id,leased_until)
-                         values($1,$2,$3,$4,$5,$6,now()+$7::interval) returning id, external_id, leased_until`,
-			ag.ID, checkID, taskID, kind, spec, msg.ID, fmt.Sprintf("%f seconds", a.cfg.LeaseTTL.Seconds())).
-			Scan(&leaseID, &leaseExtID, &leasedUntil)
-		if err != nil {
-			_ = a.redis.Del(r.Context(), lockKey).Err()
-			continue
-		}
+	process := func(messages []redis.XMessage) {
+		for _, msg := range messages {
+			if len(leases) >= requested {
+				return
+			}
+			taskID := uuidFromAny(msg.Values["task_id"])
+			checkID := uuidFromAny(msg.Values["check_id"])
+			kind := strFromAny(msg.Values["kind"])
+			spec := []byte(strFromAny(msg.Values["spec"]))
+			if taskID == uuid.Nil || checkID == uuid.Nil || kind == "" || len(spec) == 0 {
+				continue
+			}
+			lockKey := leaseKey(msg.ID)
+			ok, err := a.redis.SetNX(ctx, lockKey, ag.ID.String(), a.cfg.LeaseTTL).Result()
+			if err != nil || !ok {
+				continue
+			}
+			var (
+				leaseID     uuid.UUID
+				leaseExtID  int64
+				leasedUntil time.Time
+			)
+			err = a.pool.QueryRow(ctx,
+				`insert into leases(agent_id,check_id,task_id,kind,spec,stream_id,leased_until)
+                             values($1,$2,$3,$4,$5,$6,now()+$7::interval) returning id, external_id, leased_until`,
+				ag.ID, checkID, taskID, kind, spec, msg.ID, fmt.Sprintf("%f seconds", a.cfg.LeaseTTL.Seconds())).
+				Scan(&leaseID, &leaseExtID, &leasedUntil)
+			if err != nil {
+				_ = a.redis.Del(ctx, lockKey).Err()
+				continue
+			}
 
-		// Публикуем минимальное событие "check.start" для карты
-		a.publishMapStart(r.Context(), checkID, ag, kind, spec)
+			// Публикуем минимальное событие "check.start" для карты
+			a.publishMapStart(ctx, checkID, ag, kind, spec)
 
-		leases = append(leases, leaseDTO{
-			LeaseID:      uint64(leaseExtID),
-			TaskID:       uuidToUint64(taskID),
-			Kind:         kind,
-			LeaseUntilMs: leasedUntil.UTC().UnixMilli(),
-			Spec:         json.RawMessage(spec),
-		})
-		if len(leases) >= requested {
+			leases = append(leases, leaseDTO{
+				LeaseID:      uint64(leaseExtID),
+				TaskID:       uuidToUint64(taskID),
+				Kind:         kind,
+				LeaseUntilMs: leasedUntil.UTC().UnixMilli(),
+				Spec:         json.RawMessage(spec),
+			})
+		}
+	}
+
+	const backlogWindow = 32
+	backlogStart := "-"
+	backlogDrained := false
+
+	for len(leases) < requested {
+		remaining := requested - len(leases)
+		if remaining <= 0 {
 			break
+		}
+		if !backlogDrained {
+			count := remaining
+			if count > backlogWindow {
+				count = backlogWindow
+			}
+			msgs, err := a.redis.XRangeN(ctx, a.cfg.StreamTasks, backlogStart, "+", int64(count)).Result()
+			if err != nil && !errors.Is(err, redis.Nil) {
+				http.Error(w, "queue error", http.StatusBadGateway)
+				return
+			}
+			if len(msgs) == 0 {
+				backlogDrained = true
+				continue
+			}
+			a.observeStreamRead(ctx, a.cfg.StreamTasks, requested, msgs)
+			process(msgs)
+			backlogStart = "(" + msgs[len(msgs)-1].ID
+			if len(msgs) < int(count) {
+				backlogDrained = true
+			}
+			continue
+		}
+
+		args := &redis.XReadArgs{Streams: []string{a.cfg.StreamTasks, "$"}, Count: int64(remaining), Block: block}
+		res, err := a.redis.XRead(ctx, args).Result()
+		if err != nil {
+			if errors.Is(err, redis.Nil) {
+				break
+			}
+			http.Error(w, "queue error", http.StatusBadGateway)
+			return
+		}
+		if len(res) == 0 || len(res[0].Messages) == 0 {
+			break
+		}
+		msgs := res[0].Messages
+		a.observeStreamRead(ctx, a.cfg.StreamTasks, requested, msgs)
+		before := len(leases)
+		process(msgs)
+		if len(leases) == before {
+			// Все доставленные сообщения уже заняты — продолжаем ждать новые
+			continue
 		}
 	}
 

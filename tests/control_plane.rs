@@ -51,6 +51,7 @@ impl ControlPlaneTransport for MockBackendTransport {
             agent_id: registration.agent_id.0,
             lease_duration_ms: duration_to_millis(registration.lease_duration),
             heartbeat_timeout_ms: duration_to_millis(registration.heartbeat_timeout),
+            auth_token: registration.auth_token.clone(),
         })
     }
 

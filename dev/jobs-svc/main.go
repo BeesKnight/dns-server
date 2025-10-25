@@ -36,11 +36,12 @@ type Config struct {
 	RedisAddr     string
 	RedisPassword string
 
-	StreamTasks  string
-	ClaimBlockMs int64
-	LeaseTTL     time.Duration
-	MaxRetries   int
-	RetryBackoff time.Duration
+	StreamTasks      string
+	ClaimBlockMs     int64
+	LeaseTTL         time.Duration
+	HeartbeatTimeout time.Duration
+	MaxRetries       int
+	RetryBackoff     time.Duration
 
 	DefaultMaxParallel int
 	CacheTTL           time.Duration
@@ -96,11 +97,12 @@ func loadConfig() Config {
 		RedisAddr:     env("REDIS_ADDR", "redis:6379"),
 		RedisPassword: env("REDIS_PASSWORD", ""),
 
-		StreamTasks:  env("STREAM_TASKS", "check_tasks"),
-		ClaimBlockMs: int64(ienv("CLAIM_BLOCK_MS", 20000)),
-		LeaseTTL:     denv("LEASE_TTL", "90s"),
-		MaxRetries:   ienv("MAX_RETRIES", 2),
-		RetryBackoff: denv("RETRY_BACKOFF", "5s"),
+		StreamTasks:      env("STREAM_TASKS", "check_tasks"),
+		ClaimBlockMs:     int64(ienv("CLAIM_BLOCK_MS", 20000)),
+		LeaseTTL:         denv("LEASE_TTL", "90s"),
+		HeartbeatTimeout: denv("HEARTBEAT_TIMEOUT", "45s"),
+		MaxRetries:       ienv("MAX_RETRIES", 2),
+		RetryBackoff:     denv("RETRY_BACKOFF", "5s"),
 
 		DefaultMaxParallel: ienv("DEFAULT_MAX_PARALLEL", 4),
 		CacheTTL:           denv("CACHE_TTL", "30s"),
@@ -350,8 +352,10 @@ type registerReq struct {
 	MaxParallel *int   `json:"max_parallel,omitempty"`
 }
 type registerResp struct {
-	AgentID uuid.UUID `json:"AgentID"`
-	Token   string    `json:"Token"`
+	AgentID            uuid.UUID `json:"agent_id"`
+	LeaseDurationMs    int64     `json:"lease_duration_ms"`
+	HeartbeatTimeoutMs int64     `json:"heartbeat_timeout_ms"`
+	Token              string    `json:"token"`
 }
 
 type heartbeatReq struct {
@@ -407,7 +411,13 @@ func (a *App) handleAgentRegister(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
-	_ = json.NewEncoder(w).Encode(registerResp{AgentID: id, Token: plain})
+	resp := registerResp{
+		AgentID:            id,
+		LeaseDurationMs:    a.cfg.LeaseTTL.Milliseconds(),
+		HeartbeatTimeoutMs: a.cfg.HeartbeatTimeout.Milliseconds(),
+		Token:              plain,
+	}
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func (a *App) handleHeartbeat(w http.ResponseWriter, r *http.Request) {

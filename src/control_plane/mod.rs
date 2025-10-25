@@ -40,6 +40,7 @@ pub struct RegisterResponse {
     pub agent_id: u64,
     pub lease_duration_ms: u64,
     pub heartbeat_timeout_ms: u64,
+    pub token: Option<String>,
 }
 
 /// Heartbeat acknowledgement used to refresh the heartbeat deadline.
@@ -401,6 +402,7 @@ struct AgentRuntime {
     lease_deadlines: HashMap<u64, Instant>,
     lease_duration: Duration,
     heartbeat_timeout: Duration,
+    token: Option<String>,
     attempts: HashMap<AgentOperation, u32>,
 }
 
@@ -413,6 +415,7 @@ impl AgentRuntime {
             lease_deadlines: HashMap::new(),
             lease_duration: Duration::from_millis(0),
             heartbeat_timeout: Duration::from_millis(0),
+            token: None,
             attempts: HashMap::new(),
         }
     }
@@ -440,6 +443,7 @@ impl AgentRuntime {
         self.lease_duration = Duration::from_millis(response.lease_duration_ms);
         self.heartbeat_timeout = Duration::from_millis(response.heartbeat_timeout_ms);
         self.heartbeat_deadline = Some(Instant::now() + self.heartbeat_timeout);
+        self.token = response.token.clone();
         self.lifecycle = Lifecycle::Active;
         Ok(())
     }

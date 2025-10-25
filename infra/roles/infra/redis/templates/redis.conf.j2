@@ -9,3 +9,4 @@ requirepass {{ redis_password }}
 masterauth {{ redis_password }}
 {% endif %}
 appendonly {{ redis_appendonly }}
+maxmemory-policy {{ redis_maxmemory_policy }}

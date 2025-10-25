@@ -576,8 +576,11 @@ func (a *App) handleClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	messages := res[0].Messages
+	a.observeStreamRead(r.Context(), a.cfg.StreamTasks, requested, messages)
+
 	var leases []leaseDTO
-	for _, msg := range res[0].Messages {
+	for _, msg := range messages {
 		taskID := uuidFromAny(msg.Values["task_id"])
 		checkID := uuidFromAny(msg.Values["check_id"])
 		kind := strFromAny(msg.Values["kind"])
@@ -872,7 +875,8 @@ func (a *App) retryLoop() {
 				"kind":     it.Kind,
 				"spec":     string(it.Spec),
 			}
-			if _, err := a.redis.XAdd(ctx, &redis.XAddArgs{Stream: a.cfg.StreamTasks, Values: val}).Result(); err == nil {
+			if id, err := a.redis.XAdd(ctx, &redis.XAddArgs{Stream: a.cfg.StreamTasks, Values: val}).Result(); err == nil {
+				a.observeStreamWrite(ctx, a.cfg.StreamTasks, id, "requeue")
 				_, _ = a.pool.Exec(ctx, `delete from leases where id=$1 and leased_until < now()`, it.ID)
 				_ = a.redis.Del(ctx, leaseKey(it.StreamID)).Err()
 				_, _ = a.redis.XDel(ctx, a.cfg.StreamTasks, it.StreamID).Result()
@@ -972,12 +976,80 @@ func (a *App) publishMapEvent(ctx context.Context, ev mapEvent) {
 	_ = a.redis.Publish(ctx, a.cfg.MapPubChannel, string(b)).Err()
 
 	// Stream (история): MAXLEN ~ a.cfg.MapStreamMaxLen
-	_, _ = a.redis.XAdd(ctx, &redis.XAddArgs{
+	if id, err := a.redis.XAdd(ctx, &redis.XAddArgs{
 		Stream: a.cfg.MapStream,
 		MaxLen: int64(a.cfg.MapStreamMaxLen),
 		Approx: true,
 		Values: map[string]any{"json": string(b)},
-	}).Result()
+	}).Result(); err != nil {
+		a.log.Warn("map_stream_append_failed", "err", err)
+	} else {
+		a.observeStreamWrite(ctx, a.cfg.MapStream, id, ev.Type)
+	}
+}
+
+func streamIDTime(id string) (time.Time, bool) {
+	parts := strings.SplitN(id, "-", 2)
+	if len(parts) == 0 {
+		return time.Time{}, false
+	}
+	ms, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return time.UnixMilli(ms), true
+}
+
+func (a *App) observeStreamRead(ctx context.Context, stream string, requested int, messages []redis.XMessage) {
+	if len(messages) == 0 {
+		return
+	}
+	now := time.Now()
+	var (
+		totalLag time.Duration
+		maxLag   time.Duration
+		counted  int
+	)
+	for _, msg := range messages {
+		if ts, ok := streamIDTime(msg.ID); ok {
+			lag := now.Sub(ts)
+			if lag < 0 {
+				lag = 0
+			}
+			totalLag += lag
+			if lag > maxLag {
+				maxLag = lag
+			}
+			counted++
+		}
+	}
+	avgLagMs := int64(0)
+	if counted > 0 {
+		avgLagMs = (totalLag / time.Duration(counted)).Milliseconds()
+	}
+	length, err := a.redis.XLen(ctx, stream).Result()
+	if err != nil {
+		a.log.Warn("stream_read_metrics", "stream", stream, "err", err)
+	}
+	a.log.Info("stream_read", "stream", stream, "requested", requested, "delivered", len(messages),
+		"lag_max_ms", maxLag.Milliseconds(), "lag_avg_ms", avgLagMs, "stream_length", length)
+}
+
+func (a *App) observeStreamWrite(ctx context.Context, stream, id, source string) {
+	length, err := a.redis.XLen(ctx, stream).Result()
+	if err != nil {
+		a.log.Warn("stream_write_metrics", "stream", stream, "source", source, "err", err)
+		return
+	}
+	var lagMs int64
+	if ts, ok := streamIDTime(id); ok {
+		lag := time.Since(ts)
+		if lag < 0 {
+			lag = 0
+		}
+		lagMs = lag.Milliseconds()
+	}
+	a.log.Info("stream_write", "stream", stream, "source", source, "id", id, "stream_length", length, "lag_ms", lagMs)
 }
 
 func (a *App) publishMapStart(ctx context.Context, checkID uuid.UUID, ag *agentAuth, kind string, spec []byte) {

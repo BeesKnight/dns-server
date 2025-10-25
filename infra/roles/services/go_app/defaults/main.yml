@@ -1,0 +1,71 @@
+---
+# Default variables for Go application deployment
+
+# Name of the service (also used for binary name by default)
+go_app_service_name: "{{ inventory_hostname }}"
+
+# Path to the application source directory on the target host
+go_app_src_dir: "/srv/{{ go_app_service_name }}"
+
+# Name of the compiled binary
+go_app_binary_name: "{{ go_app_service_name }}"
+
+# Optional explicit path to the compiled binary after `go build`
+go_app_binary_source: "{{ go_app_src_dir }}/cmd/{{ go_app_binary_name }}/{{ go_app_binary_name }}"
+
+# Command executed to build the Go application
+go_app_build_command: "go build ./cmd/..."
+
+# Environment variables for the build step
+go_app_build_env: {}
+
+# Directory used to stage packaged artifacts
+go_app_package_staging_dir: "/tmp/{{ go_app_service_name }}-package"
+
+# Path to the generated archive with the binary
+go_app_package_path: "/tmp/{{ go_app_binary_name }}.tar.gz"
+
+# Target directory where the application will be deployed
+go_app_release_dir: "/opt/aezacheck/{{ go_app_service_name }}"
+
+# Location of the environment file written for the service
+go_app_env_file: "{{ go_app_release_dir }}/.env"
+
+# Mapping of environment variables to render into the .env file
+go_app_env_map: {}
+
+# Name of the systemd service unit file
+go_app_systemd_unit: "{{ go_app_service_name }}.service"
+
+# Template names (relative to this role)
+go_app_env_template: "env.j2"
+go_app_systemd_template: "go-app.service.j2"
+
+# Runtime configuration path passed to the application
+go_app_config_path: "{{ go_app_release_dir }}/config.yaml"
+
+# Command used to start the service
+# Additional arguments can be defined through `go_app_exec_args`
+go_app_exec_start: "{{ go_app_release_dir }}/{{ go_app_binary_name }}"
+
+go_app_exec_args: ["--config", "{{ go_app_config_path }}"]
+
+# Command executed before the service starts to run migrations
+# Set to an empty string to disable ExecStartPre
+go_app_migrate_command: "{{ go_app_release_dir }}/{{ go_app_binary_name }} migrate --config {{ go_app_config_path }}"
+
+# Resource limits for the systemd unit
+go_app_memory_limit: "512M"
+go_app_cpu_quota: "80%"
+
+# Database information used to enable pgcrypto extension (optional)
+go_app_database_name: null
+go_app_pg_owner: "postgres"
+go_app_database_host: null
+
+# Additional options for the systemd unit
+# e.g. WorkingDirectory, Environment overrides, etc.
+go_app_systemd_extra: {}
+
+# Whether the service should be started after deployment
+go_app_enable_service: true

@@ -1,0 +1,18 @@
+---
+- name: Deploy auth service
+  hosts: auth_svc
+  become: true
+  roles:
+    - services/go_app
+
+- name: Deploy sites service
+  hosts: sites_svc
+  become: true
+  roles:
+    - services/go_app
+
+- name: Deploy jobs service
+  hosts: jobs_svc
+  become: true
+  roles:
+    - services/go_app

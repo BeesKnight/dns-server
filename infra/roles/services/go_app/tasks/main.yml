@@ -1,0 +1,114 @@
+---
+- name: Ensure release directory exists
+  ansible.builtin.file:
+    path: "{{ go_app_release_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Reset package staging directory
+  ansible.builtin.file:
+    path: "{{ go_app_package_staging_dir }}"
+    state: absent
+
+- name: Create package staging directory
+  ansible.builtin.file:
+    path: "{{ go_app_package_staging_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Build Go application
+  ansible.builtin.command: "{{ go_app_build_command }}"
+  args:
+    chdir: "{{ go_app_src_dir }}"
+  environment: "{{ go_app_build_env }}"
+  register: go_app_build_result
+  changed_when: true
+
+- name: Verify compiled binary exists
+  ansible.builtin.stat:
+    path: "{{ go_app_binary_source }}"
+  register: go_app_binary_stat
+
+- name: Fail if compiled binary is missing
+  ansible.builtin.fail:
+    msg: "Compiled binary was not found at {{ go_app_binary_source }}"
+  when: not go_app_binary_stat.stat.exists
+
+- name: Stage compiled binary
+  ansible.builtin.copy:
+    src: "{{ go_app_binary_source }}"
+    dest: "{{ go_app_package_staging_dir }}/{{ go_app_binary_name }}"
+    remote_src: true
+    mode: "0755"
+
+- name: Package binary archive
+  ansible.builtin.command: >-
+    tar czf {{ go_app_package_path }} {{ go_app_binary_name }}
+  args:
+    chdir: "{{ go_app_package_staging_dir }}"
+  changed_when: true
+
+- name: Deploy packaged binary
+  ansible.builtin.unarchive:
+    src: "{{ go_app_package_path }}"
+    dest: "{{ go_app_release_dir }}"
+    remote_src: true
+  notify: restart go app service
+
+- name: Remove package staging directory
+  ansible.builtin.file:
+    path: "{{ go_app_package_staging_dir }}"
+    state: absent
+
+- name: Remove packaged archive
+  ansible.builtin.file:
+    path: "{{ go_app_package_path }}"
+    state: absent
+
+- name: Ensure deployed binary permissions
+  ansible.builtin.file:
+    path: "{{ go_app_release_dir }}/{{ go_app_binary_name }}"
+    state: file
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Render environment file
+  ansible.builtin.template:
+    src: "{{ go_app_env_template }}"
+    dest: "{{ go_app_env_file }}"
+    owner: root
+    group: root
+    mode: "0640"
+  notify: restart go app service
+
+- name: Install systemd unit file
+  ansible.builtin.template:
+    src: "{{ go_app_systemd_template }}"
+    dest: "/etc/systemd/system/{{ go_app_systemd_unit }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: restart go app service
+
+- name: Ensure pgcrypto extension is available
+  ansible.builtin.command: >-
+    psql {{ '-h ' + go_app_database_host if go_app_database_host else '' }}
+         -d {{ go_app_database_name }}
+         -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;"
+  become: true
+  become_user: "{{ go_app_pg_owner }}"
+  register: go_app_pgcrypto_result
+  changed_when: "CREATE EXTENSION" in go_app_pgcrypto_result.stdout
+  when: go_app_database_name is not none
+
+- name: Ensure Go application service is enabled and started
+  ansible.builtin.systemd:
+    name: "{{ go_app_systemd_unit }}"
+    state: started
+    enabled: true
+  when: go_app_enable_service

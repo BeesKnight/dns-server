@@ -412,6 +412,12 @@ impl Default for BackoffPolicy {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct AgentBootstrap {
+    pub agent_id: u64,
+    pub auth_token: String,
+}
+
 #[derive(Debug)]
 struct AgentRuntime {
     lifecycle: Lifecycle,
@@ -436,6 +442,16 @@ impl AgentRuntime {
             attempts: HashMap::new(),
             auth_token: None,
         }
+    }
+
+    fn with_bootstrap(bootstrap: Option<AgentBootstrap>) -> Self {
+        let mut runtime = Self::new();
+        if let Some(bootstrap) = bootstrap {
+            runtime.lifecycle = Lifecycle::Active;
+            runtime.agent_id = Some(bootstrap.agent_id);
+            runtime.auth_token = Some(bootstrap.auth_token);
+        }
+        runtime
     }
 
     fn agent_id(&self) -> Result<u64, ControlPlaneError> {
@@ -514,11 +530,11 @@ struct ControlPlaneInner<T: ControlPlaneTransport> {
 }
 
 impl<T: ControlPlaneTransport> ControlPlaneInner<T> {
-    fn new(transport: T, policy: BackoffPolicy) -> Self {
+    fn new(transport: T, policy: BackoffPolicy, bootstrap: Option<AgentBootstrap>) -> Self {
         Self {
             transport,
             policy,
-            runtime: Mutex::new(AgentRuntime::new()),
+            runtime: Mutex::new(AgentRuntime::with_bootstrap(bootstrap)),
         }
     }
 }
@@ -537,11 +553,23 @@ impl<T: ControlPlaneTransport> Clone for ControlPlaneClient<T> {
 
 impl<T: ControlPlaneTransport> ControlPlaneClient<T> {
     pub fn new(transport: T) -> Self {
-        Self::with_policy(transport, BackoffPolicy::default())
+        Self::with_policy_and_bootstrap(transport, BackoffPolicy::default(), None)
     }
 
     pub fn with_policy(transport: T, policy: BackoffPolicy) -> Self {
-        let inner = ControlPlaneInner::new(transport, policy);
+        Self::with_policy_and_bootstrap(transport, policy, None)
+    }
+
+    pub fn with_bootstrap(transport: T, bootstrap: Option<AgentBootstrap>) -> Self {
+        Self::with_policy_and_bootstrap(transport, BackoffPolicy::default(), bootstrap)
+    }
+
+    pub fn with_policy_and_bootstrap(
+        transport: T,
+        policy: BackoffPolicy,
+        bootstrap: Option<AgentBootstrap>,
+    ) -> Self {
+        let inner = ControlPlaneInner::new(transport, policy, bootstrap);
         Self {
             inner: Arc::new(inner),
         }

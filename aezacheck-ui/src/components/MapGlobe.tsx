@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Globe, { GlobeMethods } from "react-globe.gl";
 import { feature } from "topojson-client";
-import { geoCentroid, geoArea } from "d3-geo";
+import { geoCentroid, geoArea, geoDistance } from "d3-geo";
 import type { FeatureCollection, Feature, MultiPolygon, Polygon } from "geojson";
 import { mapSSE } from "../lib/api";
 import type { Arc, Dot, WorkerCommand, WorkerResponse } from "../types/globe";
@@ -29,10 +29,14 @@ const LABEL_COLOR = "rgba(226,232,240,.92)";
 
 const FPS_LOW_THRESHOLD = 28;
 const FPS_HIGH_THRESHOLD = 34;
+const MIN_CAMERA_ALT = 0.55;
+const MAX_CAMERA_ALT = 2.6;
+const VIEW_EPS = 1e-3;
 
 export default function MapGlobe() {
-  const globeRef = useRef<GlobeMethods>();
+  const globeRef = useRef<GlobeMethods | null>(null);
   const camAltRef = useRef(1.6); // текущая высота камеры
+  const camViewRef = useRef({ lat: 30, lng: 20 });
   const [tick, setTick] = useState(0); // лёгкий триггер пересчёта LOD
 
   const [polygons, setPolygons] = useState<CountryFeature[]>([]);
@@ -47,11 +51,75 @@ export default function MapGlobe() {
   const pointCacheRef = useRef(new Map<string, Dot>());
   const zoomRaf = useRef<number | null>(null);
   const performanceModeRef = useRef(false);
+  const polygonCentroidsRef = useRef<[number, number][]>([]);
+
+  const clampAltitude = (value: number) =>
+    Math.min(MAX_CAMERA_ALT, Math.max(MIN_CAMERA_ALT, value));
+
+  const queueTick = useCallback(() => {
+    if (zoomRaf.current) return;
+    zoomRaf.current = requestAnimationFrame(() => {
+      zoomRaf.current = null;
+      setTick((t) => t + 1);
+    });
+  }, [setTick]);
+
+  const adjustCameraControls = useCallback((altitude: number) => {
+    const controls = globeRef.current?.controls();
+    if (!controls) return;
+
+    const extraTilt = Math.max(0, 1.15 - altitude);
+    const maxPolar = Math.max(Math.PI / 3, Math.PI / 2 - 0.1 - extraTilt * 0.22);
+    const minPolar = Math.max(Math.PI / 6, maxPolar - 0.35);
+
+    controls.maxPolarAngle = maxPolar;
+    controls.minPolarAngle = Math.min(minPolar, maxPolar);
+  }, []);
+
+  const syncCameraState = useCallback(() => {
+    const pov = globeRef.current?.pointOfView();
+    if (!pov) return;
+
+    const prevAlt = camAltRef.current;
+    const prevView = camViewRef.current;
+
+    const rawAlt = typeof pov.altitude === "number" ? pov.altitude : prevAlt;
+    const nextAlt = clampAltitude(rawAlt);
+
+    const lat = typeof pov.lat === "number" ? pov.lat : prevView.lat;
+    const lng = typeof pov.lng === "number" ? pov.lng : prevView.lng;
+
+    const latChanged = Math.abs(prevView.lat - lat) > VIEW_EPS;
+    const lngChanged = Math.abs(prevView.lng - lng) > VIEW_EPS;
+    const altChanged = Math.abs(prevAlt - nextAlt) > VIEW_EPS;
+
+    if (latChanged || lngChanged) {
+      camViewRef.current = { lat, lng };
+    }
+
+    if (altChanged) {
+      camAltRef.current = nextAlt;
+    }
+
+    if (Math.abs(nextAlt - rawAlt) > VIEW_EPS) {
+      globeRef.current?.pointOfView({ lat, lng, altitude: nextAlt }, 120);
+    }
+
+    if (altChanged || latChanged || lngChanged) {
+      queueTick();
+    }
+
+    adjustCameraControls(nextAlt);
+  }, [adjustCameraControls, queueTick]);
 
   /* ---------- загрузка карт и расчёт подписей ---------- */
   useEffect(() => {
     // стартовая точка обзора
     globeRef.current?.pointOfView({ lat: 30, lng: 20, altitude: 1.6 }, 1200);
+    camAltRef.current = 1.6;
+    camViewRef.current = { lat: 30, lng: 20 };
+    queueTick();
+    adjustCameraControls(1.6);
 
     const worker = new Worker(new URL("../workers/globeWorker.ts", import.meta.url));
     workerRef.current = worker;
@@ -194,6 +262,7 @@ export default function MapGlobe() {
 
         const feats = fc.features as CountryFeature[];
         setPolygons(feats);
+        polygonCentroidsRef.current = feats.map((f) => geoCentroid(f as any));
 
         // готовим подписи
         const prepared = feats
@@ -237,7 +306,20 @@ export default function MapGlobe() {
       worker.terminate();
       workerRef.current = null;
     };
-  }, []);
+  }, [adjustCameraControls, queueTick]);
+
+  useEffect(() => {
+    const controls = globeRef.current?.controls();
+    if (!controls) return;
+
+    const handleChange = () => syncCameraState();
+    controls.addEventListener("change", handleChange);
+    syncCameraState();
+
+    return () => {
+      controls.removeEventListener("change", handleChange);
+    };
+  }, [syncCameraState]);
 
   /* ---------- простая SSE-логика (оставил как было) ---------- */
   useEffect(() => {
@@ -307,20 +389,44 @@ export default function MapGlobe() {
     return labelsAll.slice(0, take);
   }, [labelsAll, tick]);
 
-  // без setState на каждый zoom — только лёгкий "ping"
-  const handleZoom = () => {
-    const a = globeRef.current?.pointOfView()?.altitude;
-    if (typeof a === "number") {
-      camAltRef.current = a;
-      // лёгкое обновление для пересчёта visibleLabels (раз в ~150мс)
-      if (!zoomRaf.current) {
-        zoomRaf.current = requestAnimationFrame(() => {
-          zoomRaf.current = null;
-          setTick((t) => t + 1);
-        });
-      }
+  const labelResolution = useMemo(() => {
+    const alt = camAltRef.current;
+    if (performanceMode) {
+      if (alt < 0.7) return 0.32;
+      if (alt < 0.95) return 0.45;
+      if (alt < 1.25) return 0.6;
+      return 0.75;
     }
-  };
+    if (alt < 0.65) return 0.26;
+    if (alt < 0.8) return 0.34;
+    if (alt < 1) return 0.48;
+    if (alt < 1.25) return 0.62;
+    return 0.85;
+  }, [performanceMode, tick]);
+
+  const visiblePolygons = useMemo(() => {
+    if (!polygons.length) return polygons;
+    const alt = camAltRef.current;
+    if (alt >= 1.25) return polygons;
+
+    const centroids = polygonCentroidsRef.current;
+    const view = camViewRef.current;
+
+    const threshold =
+      alt < 0.62 ? 0.78 : alt < 0.75 ? 0.95 : alt < 0.9 ? 1.18 : alt < 1.05 ? 1.45 : 1.95;
+
+    return polygons.filter((_, idx) => {
+      const centroid = centroids[idx];
+      if (!centroid) return true;
+      const dist = geoDistance([view.lng, view.lat], centroid);
+      return dist <= threshold;
+    });
+  }, [polygons, tick]);
+
+  // без setState на каждый zoom — только лёгкий "ping"
+  const handleZoom = useCallback(() => {
+    syncCameraState();
+  }, [syncCameraState]);
 
   /* ---------- размер шрифта от площади (без тяжёлых вычислений) ---------- */
   const labelSize = (d: CountryLabel) => {
@@ -350,7 +456,7 @@ export default function MapGlobe() {
         bumpImageUrl={performanceMode ? undefined : "//unpkg.com/three-globe/example/img/earth-topology.png"}
 
         /* материки */
-        polygonsData={polygons}
+        polygonsData={visiblePolygons}
         polygonAltitude={0.02}
         polygonCapColor={() => LAND_CAP}
         polygonSideColor={() => LAND_SIDE}
@@ -365,7 +471,7 @@ export default function MapGlobe() {
         labelSize={labelSize}
         labelColor={() => LABEL_COLOR}
         labelAltitude={0.03}
-        labelResolution={performanceMode ? 1 : 2}
+        labelResolution={labelResolution}
         labelIncludeDot={false}
 
         /* точки (агенты/цели) */

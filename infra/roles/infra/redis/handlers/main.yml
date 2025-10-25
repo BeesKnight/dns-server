@@ -1,0 +1,16 @@
+---
+- name: restart redis
+  become: true
+  ansible.builtin.service:
+    name: "{{ redis_service_name }}"
+    state: restarted
+
+- name: redis healthcheck
+  listen: healthcheck
+  ansible.builtin.command: >-
+    redis-cli -h {{ REDIS_HOST | default('127.0.0.1') }} -p {{ redis_port }}{% if redis_password %} -a {{ redis_password }}{% endif %} ping
+  register: redis_healthcheck_result
+  changed_when: false
+  retries: 10
+  delay: 3
+  until: redis_healthcheck_result.rc == 0 and redis_healthcheck_result.stdout.strip() == 'PONG'

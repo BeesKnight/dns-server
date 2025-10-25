@@ -1,5 +1,5 @@
 // src/components/Map2D.tsx
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import {
   geoMercator,
@@ -258,6 +258,15 @@ export default function Map2D({ offsetTop = 0 }: Props) {
   const idRef = useRef(0);
   const [nodeDensity, setNodeDensity] = useState(0.9);
   const [speedMultiplier, setSpeedMultiplier] = useState(1);
+  const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const [isDragging, setIsDragging] = useState(false);
+  const dragState = useRef({
+    active: false,
+    startX: 0,
+    startY: 0,
+    baseX: 0,
+    baseY: 0
+  });
 
   useEffect(() => {
     let alive = true;
@@ -410,6 +419,46 @@ export default function Map2D({ offsetTop = 0 }: Props) {
   };
   const onSvgLeave = () => setHover(null);
 
+  const handleDragMove = useCallback((event: MouseEvent) => {
+    if (!dragState.current.active) return;
+    const dx = event.clientX - dragState.current.startX;
+    const dy = event.clientY - dragState.current.startY;
+    setPan({ x: dragState.current.baseX + dx, y: dragState.current.baseY + dy });
+  }, []);
+
+  const handleDragUp = useCallback(() => {
+    if (!dragState.current.active) return;
+    dragState.current.active = false;
+    setIsDragging(false);
+    window.removeEventListener("mousemove", handleDragMove);
+    window.removeEventListener("mouseup", handleDragUp);
+  }, [handleDragMove]);
+
+  const handleSvgMouseDown = useCallback(
+    (event: ReactMouseEvent<SVGSVGElement>) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      dragState.current = {
+        active: true,
+        startX: event.clientX,
+        startY: event.clientY,
+        baseX: pan.x,
+        baseY: pan.y
+      };
+      setIsDragging(true);
+      window.addEventListener("mousemove", handleDragMove);
+      window.addEventListener("mouseup", handleDragUp);
+    },
+    [handleDragMove, handleDragUp, pan.x, pan.y]
+  );
+
+  useEffect(() => {
+    return () => {
+      window.removeEventListener("mousemove", handleDragMove);
+      window.removeEventListener("mouseup", handleDragUp);
+    };
+  }, [handleDragMove, handleDragUp]);
+
   const handleNodeEnter = (
     e: ReactMouseEvent<SVGCircleElement>,
     node: NetworkNode
@@ -476,7 +525,14 @@ export default function Map2D({ offsetTop = 0 }: Props) {
             }
           `}
         </style>
-        <svg width={w} height={h} onMouseMove={onSvgMove} onMouseLeave={onSvgLeave}>
+        <svg
+          width={w}
+          height={h}
+          onMouseMove={onSvgMove}
+          onMouseLeave={onSvgLeave}
+          onMouseDown={handleSvgMouseDown}
+          style={{ cursor: isDragging ? "grabbing" : "grab" }}
+        >
           <defs>
             <radialGradient id="oceanGlow" cx="50%" cy="45%" r="70%">
               <stop offset="0%" stopColor="rgba(12, 74, 110, 0.85)" />
@@ -524,7 +580,7 @@ export default function Map2D({ offsetTop = 0 }: Props) {
 
           <rect width={w} height={h} fill="url(#oceanGlow)" />
           <rect width={w} height={h} fill="url(#polarGlow)" mask="url(#oceanMask)" opacity={0.6} />
-          <g>
+          <g transform={`translate(${pan.x},${pan.y})`}>
             <path d={path(graticule) || ""} fill="none" stroke={GRID_STROKE} strokeWidth={0.6} opacity={0.6} />
 
             {worldFc &&
@@ -536,7 +592,7 @@ export default function Map2D({ offsetTop = 0 }: Props) {
                   stroke={BORDER_STROKE}
                   strokeWidth={0.6}
                   filter="url(#landHalo)"
-                  style={{ transition: "fill .18s ease" }}
+                  style={{ transition: "fill .18s ease", cursor: isDragging ? "grabbing" : "pointer" }}
                   onMouseEnter={(e) => onEnterCountry(e, f)}
                   onMouseLeave={onLeaveCountry}
                   onMouseOver={(e) => ((e.currentTarget as SVGPathElement).style.fill = HOVER_FILL)}
@@ -565,7 +621,8 @@ export default function Map2D({ offsetTop = 0 }: Props) {
                     style={{
                       animationDuration: duration,
                       strokeOpacity: 0.55,
-                      strokeDashoffset: dashArray
+                      strokeDashoffset: dashArray,
+                      cursor: isDragging ? "grabbing" : "pointer"
                     }}
                     onMouseEnter={(e) => handleRouteEnter(e, route)}
                     onMouseLeave={() => setHover(null)}
@@ -577,6 +634,7 @@ export default function Map2D({ offsetTop = 0 }: Props) {
                     strokeWidth={2.4}
                     strokeOpacity={0.85}
                     filter="url(#landHalo)"
+                    style={{ cursor: isDragging ? "grabbing" : "pointer" }}
                     onMouseEnter={(e) => handleRouteEnter(e, route)}
                     onMouseLeave={() => setHover(null)}
                   />
@@ -607,7 +665,11 @@ export default function Map2D({ offsetTop = 0 }: Props) {
                     stroke="#38bdf8"
                     strokeWidth={1.2}
                     className="map-node"
-                    style={{ animationDuration: pulseDuration, animationDelay: `${idx * 0.25}s` }}
+                    style={{
+                      animationDuration: pulseDuration,
+                      animationDelay: `${idx * 0.25}s`,
+                      cursor: isDragging ? "grabbing" : "pointer"
+                    }}
                     onMouseEnter={(e) => handleNodeEnter(e, node)}
                     onMouseLeave={() => setHover(null)}
                   />

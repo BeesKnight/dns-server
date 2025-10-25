@@ -15,7 +15,7 @@ use thiserror::Error;
 use tokio::{
     select,
     sync::{mpsc, oneshot, watch, Mutex as AsyncMutex, Notify},
-    task::JoinHandle,
+    task::{JoinHandle, JoinSet},
     time::{self, Instant},
 };
 use tokio_util::sync::CancellationToken;
@@ -1061,11 +1061,12 @@ impl AgentPipeline {
                         return;
                     }
                 };
+                let mut joinset = JoinSet::new();
                 while let Some(cmd) = rx.recv().await {
                     let backend_task = backend_clone.clone();
                     let stats_task = stats_clone.clone();
                     let notify_task = notify_clone.clone();
-                    tokio::spawn(process_task(
+                    joinset.spawn(process_task(
                         agent_id,
                         kind,
                         latency,
@@ -1075,6 +1076,7 @@ impl AgentPipeline {
                         cmd,
                     ));
                 }
+                while joinset.join_next().await.is_some() {}
             });
             worker_handles.push(handle);
         }

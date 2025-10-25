@@ -69,7 +69,7 @@ go_app_memory_limit: "512M"
 go_app_cpu_quota: "80%"
 
 # Maximum number of open files allowed for the service (optional)
-go_app_limit_nofile: null
+go_app_limit_nofile: 65536
 
 # Database information used to enable pgcrypto extension (optional)
 go_app_database_name: null
@@ -82,3 +82,15 @@ go_app_systemd_extra: {}
 
 # Whether the service should be started after deployment
 go_app_enable_service: true
+
+# Service discovery configuration
+go_app_register_in_service_discovery: true
+go_app_service_discovery_path: "/etc/consul.d/{{ go_app_service_name }}.json"
+go_app_service_discovery_service: null
+go_app_service_host: "127.0.0.1"
+go_app_service_port: 8080
+go_app_readyz_path: "/readyz"
+go_app_readyz_interval: "15s"
+go_app_readyz_timeout: "3s"
+go_app_readyz_tls_enabled: false
+go_app_readyz_skip_verify: false

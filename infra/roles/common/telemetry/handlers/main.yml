@@ -1,0 +1,16 @@
+---
+- name: restart promtail
+  ansible.builtin.systemd:
+    name: "{{ telemetry_promtail_service }}"
+    state: restarted
+    daemon_reload: true
+
+- name: reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: reload prometheus
+  ansible.builtin.systemd:
+    name: prometheus
+    state: reloaded
+    daemon_reload: true

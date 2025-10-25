@@ -1,0 +1,15 @@
+# Managed by Ansible - metrics exporter service
+[Unit]
+Description=DNS Observability Metrics Exporter
+After=network-online.target redis.service
+
+[Service]
+Type=oneshot
+ExecStart={{ telemetry_metrics_script_path }}
+User=root
+Group=root
+RuntimeDirectory=dns-observability
+RuntimeDirectoryMode=0750
+
+[Install]
+WantedBy=multi-user.target

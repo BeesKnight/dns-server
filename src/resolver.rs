@@ -123,11 +123,12 @@ impl DnsResolver {
             }
 
             let notify = Arc::new(Notify::new());
+            let hold_duration = self.timeout.max(Duration::from_millis(50));
             guard.insert(
                 key.clone(),
                 SingleflightEntry {
                     notify: Arc::clone(&notify),
-                    expires_at: Instant::now() + Duration::from_millis(50),
+                    expires_at: Instant::now() + hold_duration,
                 },
             );
             drop(guard);

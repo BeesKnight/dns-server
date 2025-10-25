@@ -75,7 +75,7 @@ curl -H "Content-Type: application/json" -d '{"agent_id":7,"capacities":{"dns":4
    make ansible-check
    make ansible-lint
    ```
-   Эти цели соответствуют шагам Source Craft pipeline и позволяют убедиться в корректности плейбуков перед пушем.【F:Makefile†L7-L12】【F:.sourcecraft/pipeline.yml†L1-L43】
+   Эти цели соответствуют шагам Source Craft pipeline и позволяют убедиться в корректности плейбуков перед пушем.【F:Makefile†L7-L12】【F:.sourcecraft/pipeline.yaml†L120-L194】
 4. Для доступа к secrets ansible запросит пароль vault; храните его в защищённом менеджере секретов.
 
 ## Проверка работоспособности

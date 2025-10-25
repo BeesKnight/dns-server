@@ -48,6 +48,10 @@ type Config struct {
 
 	DefaultMaxParallel int
 	CacheTTL           time.Duration
+	QuickDedupTTL      time.Duration
+	QuickRateWindow    time.Duration
+	QuickRatePerUser   int
+	QuickRatePerIP     int
 
 	// SSE/карта
 	PubPrefix       string // для check-upd:* каналов (пер-чековые SSE)
@@ -109,6 +113,10 @@ func loadConfig() Config {
 
 		DefaultMaxParallel: ienv("DEFAULT_MAX_PARALLEL", 4),
 		CacheTTL:           denv("CACHE_TTL", "30s"),
+		QuickDedupTTL:      denv("QUICK_DEDUP_TTL", "45s"),
+		QuickRateWindow:    denv("QUICK_RATE_WINDOW", "1m"),
+		QuickRatePerUser:   ienv("QUICK_RATE_PER_USER", 5),
+		QuickRatePerIP:     ienv("QUICK_RATE_PER_IP", 15),
 
 		PubPrefix:       env("PUB_PREFIX", "check-upd:"),
 		MapPubChannel:   env("MAP_PUB_CHANNEL", "map:events"),
@@ -193,6 +201,7 @@ func main() {
 		rt.Get("/map/snapshot", app.handleMapSnapshot) // история из Stream
 		rt.Get("/checks/{id}/geo", app.handleCheckGeo)
 		rt.Get("/geo/lookup", app.handleGeoLookup)
+		rt.Post("/jobs/checks", app.handleQuickCheckCreate)
 	})
 
 	srv := &http.Server{Addr: cfg.HTTPAddr, Handler: r, ReadHeaderTimeout: 5 * time.Second}
@@ -691,6 +700,21 @@ func (a *App) handleReport(w http.ResponseWriter, r *http.Request) {
 
 	acknowledged := 0
 
+	quickMetaCache := map[uuid.UUID]*quickCheckMeta{}
+	fetchQuickMeta := func(id uuid.UUID) *quickCheckMeta {
+		if meta, ok := quickMetaCache[id]; ok {
+			return meta
+		}
+		meta, err := a.quickCacheMeta(r.Context(), id)
+		if err != nil {
+			a.log.Warn("quick_meta_lookup_failed", "check_id", id, "err", err)
+			quickMetaCache[id] = nil
+			return nil
+		}
+		quickMetaCache[id] = meta
+		return meta
+	}
+
 	process := func(entries []leaseReport, status string) {
 		for _, c := range entries {
 			var checkID uuid.UUID
@@ -706,10 +730,16 @@ func (a *App) handleReport(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
-			var siteID uuid.UUID
+			var siteStr sql.NullString
 			var reqIP sql.NullString
 			_ = a.pool.QueryRow(r.Context(),
-				`select site_id, request_ip::text from checks where id=$1`, checkID).Scan(&siteID, &reqIP)
+				`select site_id::text, request_ip::text from checks where id=$1`, checkID).Scan(&siteStr, &reqIP)
+			var siteID uuid.UUID
+			if siteStr.Valid {
+				if parsed, err := uuid.Parse(siteStr.String); err == nil {
+					siteID = parsed
+				}
+			}
 			_, _ = a.pool.Exec(r.Context(),
 				`update checks set started_at = coalesce(started_at, now()) where id=$1`, checkID)
 
@@ -729,17 +759,24 @@ func (a *App) handleReport(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
-			cacheKey := fmt.Sprintf("recent:%s:%s", siteID.String(), kind)
-			cacheVal := map[string]any{
-				"check_id": checkID.String(),
-				"kind":     kind,
-				"status":   status,
-				"payload":  json.RawMessage(payload),
-				"metrics":  json.RawMessage(mergedMetrics),
-				"ts":       time.Now().UTC().Format(time.RFC3339Nano),
+			var cacheKey string
+			if siteStr.Valid {
+				cacheKey = fmt.Sprintf("recent:%s:%s", siteStr.String, kind)
+			} else if meta := fetchQuickMeta(checkID); meta != nil {
+				cacheKey = fmt.Sprintf("recent:%s:%s", meta.CacheKey, kind)
 			}
-			if b, err := json.Marshal(cacheVal); err == nil {
-				_ = a.redis.Set(r.Context(), cacheKey, string(b), a.cfg.CacheTTL).Err()
+			if cacheKey != "" {
+				cacheVal := map[string]any{
+					"check_id": checkID.String(),
+					"kind":     kind,
+					"status":   status,
+					"payload":  json.RawMessage(payload),
+					"metrics":  json.RawMessage(mergedMetrics),
+					"ts":       time.Now().UTC().Format(time.RFC3339Nano),
+				}
+				if b, err := json.Marshal(cacheVal); err == nil {
+					_ = a.redis.Set(r.Context(), cacheKey, string(b), a.cfg.CacheTTL).Err()
+				}
 			}
 
 			_ = a.publishUpdate(r.Context(), checkID, "result", map[string]any{
@@ -831,9 +868,15 @@ func (a *App) retryLoop() {
 				})
 				var siteID uuid.UUID
 				var reqIP sql.NullString
+				var siteStr sql.NullString
 				_ = a.pool.QueryRow(ctx,
-					`select site_id, request_ip::text from checks where id=$1`, it.CheckID).
-					Scan(&siteID, &reqIP)
+					`select site_id::text, request_ip::text from checks where id=$1`, it.CheckID).
+					Scan(&siteStr, &reqIP)
+				if siteStr.Valid {
+					if parsed, err := uuid.Parse(siteStr.String); err == nil {
+						siteID = parsed
+					}
+				}
 				a.publishMapResult(ctx, it.CheckID, siteID, reqIP.String, nil, it.Kind, it.Spec,
 					"cancelled", json.RawMessage(`{}`), nil, "lease_timeout")
 				continue
@@ -1170,14 +1213,22 @@ func (a *App) publishMapStart(ctx context.Context, checkID uuid.UUID, ag *agentA
 	// request_ip и site_id
 	var siteID uuid.UUID
 	var reqIP sql.NullString
-	_ = a.pool.QueryRow(ctx, `select site_id, request_ip::text from checks where id=$1`, checkID).Scan(&siteID, &reqIP)
+	var siteStr sql.NullString
+	_ = a.pool.QueryRow(ctx, `select site_id::text, request_ip::text from checks where id=$1`, checkID).Scan(&siteStr, &reqIP)
+	if siteStr.Valid {
+		if parsed, err := uuid.Parse(siteStr.String); err == nil {
+			siteID = parsed
+		}
+	}
 
 	targetHost, _ := extractTargetFromSpec(kind, spec)
 	data := map[string]any{
 		"check_id": checkID,
-		"site_id":  siteID,
 		"kind":     kind,
 		"status":   "running",
+	}
+	if siteID != uuid.Nil {
+		data["site_id"] = siteID
 	}
 	source := map[string]any{}
 	if reqIP.String != "" {
@@ -1304,9 +1355,15 @@ func (a *App) publishMapDone(ctx context.Context, checkID uuid.UUID) {
 		var siteID uuid.UUID
 		var reqIP sql.NullString
 		var checkStatus sql.NullString
+		var siteStr sql.NullString
 		if err := a.pool.QueryRow(ctx,
-			`select site_id, request_ip::text, status from checks where id=$1`, checkID).
-			Scan(&siteID, &reqIP, &checkStatus); err == nil {
+			`select site_id::text, request_ip::text, status from checks where id=$1`, checkID).
+			Scan(&siteStr, &reqIP, &checkStatus); err == nil {
+			if siteStr.Valid {
+				if parsed, err := uuid.Parse(siteStr.String); err == nil {
+					siteID = parsed
+				}
+			}
 			if siteID != uuid.Nil {
 				data["site_id"] = siteID
 			}

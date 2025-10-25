@@ -25,6 +25,7 @@ hostname = "0.3"
 metrics = "0.23"
 socket2 = { version = "0.5", features = ["all"] }
 rand = "0.8"
+pnet_packet = "0.34"
 
 [dev-dependencies]
 futures = "0.3"

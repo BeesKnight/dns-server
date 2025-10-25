@@ -24,6 +24,8 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/oschwald/geoip2-golang"
 	"github.com/redis/go-redis/v9"
@@ -117,11 +119,19 @@ func loadConfig() Config {
 	}
 }
 
+type pgxPool interface {
+	Close()
+	Ping(context.Context) error
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}
+
 /*************** App ***************/
 type App struct {
 	cfg   Config
 	log   *slog.Logger
-	pool  *pgxpool.Pool
+	pool  pgxPool
 	redis *redis.Client
 
 	geo *geoIP // может быть nil (если выключено/файл не найден)
@@ -167,6 +177,7 @@ func main() {
 		rt.Post("/register", app.handleAgentRegister)
 		rt.With(app.requireAgent).Post("/heartbeat", app.handleHeartbeat)
 		rt.With(app.requireAgent).Post("/claim", app.handleClaim)
+		rt.With(app.requireAgent).Post("/extend", app.handleExtend)
 		rt.With(app.requireAgent).Post("/report", app.handleReport)
 	})
 
@@ -404,6 +415,21 @@ type claimResp struct {
 	Leases []leaseDTO `json:"leases"`
 }
 
+type extendReq struct {
+	AgentID    uint64   `json:"agent_id"`
+	LeaseIDs   []uint64 `json:"lease_ids"`
+	ExtendByMs uint64   `json:"extend_by_ms"`
+}
+
+type extendOutcome struct {
+	LeaseID       uint64 `json:"lease_id"`
+	NewDeadlineMs int64  `json:"new_deadline_ms"`
+}
+
+type extendResp struct {
+	Outcomes []extendOutcome `json:"outcomes"`
+}
+
 type reportReq struct {
 	AgentID   uint64        `json:"agent_id"`
 	Completed []leaseReport `json:"completed"`
@@ -602,6 +628,76 @@ func (a *App) handleClaim(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(claimResp{Leases: leases})
 }
 
+/*************** Extend (продление аренды) ***************/
+func (a *App) handleExtend(w http.ResponseWriter, r *http.Request) {
+	ag := agentFromCtx(r.Context())
+	if ag == nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	var req extendReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	if req.AgentID != 0 && req.AgentID != ag.ExternalID {
+		http.Error(w, "agent mismatch", http.StatusUnauthorized)
+		return
+	}
+	if len(req.LeaseIDs) == 0 {
+		http.Error(w, "no leases to extend", http.StatusBadRequest)
+		return
+	}
+	if req.ExtendByMs == 0 {
+		http.Error(w, "invalid extend", http.StatusBadRequest)
+		return
+	}
+
+	extendBy := time.Duration(req.ExtendByMs) * time.Millisecond
+	outcomes := make([]extendOutcome, 0, len(req.LeaseIDs))
+
+	for _, leaseExtID := range req.LeaseIDs {
+		var (
+			leaseID     uuid.UUID
+			streamID    string
+			leasedUntil time.Time
+		)
+		err := a.pool.QueryRow(r.Context(),
+			`select id, stream_id, leased_until from leases where external_id=$1 and agent_id=$2`,
+			leaseExtID, ag.ID).
+			Scan(&leaseID, &streamID, &leasedUntil)
+		if err != nil {
+			continue
+		}
+
+		now := time.Now()
+		if leasedUntil.Before(now) {
+			leasedUntil = now
+		}
+		deadline := leasedUntil.Add(extendBy)
+		if deadline.Before(now) {
+			continue
+		}
+
+		deadline = deadline.UTC()
+		if _, err := a.pool.Exec(r.Context(),
+			`update leases set leased_until=$1 where id=$2`, deadline, leaseID); err != nil {
+			continue
+		}
+		if err := a.redis.ExpireAt(r.Context(), leaseKey(streamID), deadline).Err(); err != nil {
+			continue
+		}
+
+		outcomes = append(outcomes, extendOutcome{
+			LeaseID:       leaseExtID,
+			NewDeadlineMs: deadline.UnixMilli(),
+		})
+	}
+
+	_ = json.NewEncoder(w).Encode(extendResp{Outcomes: outcomes})
+}
+
 /*************** Report (результаты) ***************/
 func (a *App) handleReport(w http.ResponseWriter, r *http.Request) {
 	ag := agentFromCtx(r.Context())
@@ -747,8 +843,16 @@ func (a *App) retryLoop() {
 		rows.Close()
 
 		for _, it := range todo {
+			var leasedUntil time.Time
+			if err := a.pool.QueryRow(ctx, `select leased_until from leases where id=$1`, it.ID).Scan(&leasedUntil); err != nil {
+				continue
+			}
+			now := time.Now()
+			if leasedUntil.After(now) {
+				continue
+			}
 			if it.Retry >= a.cfg.MaxRetries {
-				_, _ = a.pool.Exec(ctx, `delete from leases where id=$1`, it.ID)
+				_, _ = a.pool.Exec(ctx, `delete from leases where id=$1 and leased_until < now()`, it.ID)
 				_, _ = a.pool.Exec(ctx,
 					`insert into check_results(check_id, kind, status, payload, metrics, stream_id)
 					 values ($1,$2,'cancelled','{}',NULL,$3)`, it.CheckID, it.Kind, it.StreamID)
@@ -769,7 +873,7 @@ func (a *App) retryLoop() {
 				"spec":     string(it.Spec),
 			}
 			if _, err := a.redis.XAdd(ctx, &redis.XAddArgs{Stream: a.cfg.StreamTasks, Values: val}).Result(); err == nil {
-				_, _ = a.pool.Exec(ctx, `delete from leases where id=$1`, it.ID)
+				_, _ = a.pool.Exec(ctx, `delete from leases where id=$1 and leased_until < now()`, it.ID)
 				_ = a.redis.Del(ctx, leaseKey(it.StreamID)).Err()
 				_, _ = a.redis.XDel(ctx, a.cfg.StreamTasks, it.StreamID).Result()
 			}

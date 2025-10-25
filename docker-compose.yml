@@ -1,0 +1,64 @@
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dev}
+      POSTGRES_DB: ${POSTGRES_DB:-aezacheck}
+    ports: ["5432:5432"]
+    volumes: ["pg:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-aezacheck}"]
+      interval: 5s
+      timeout: 3s
+      retries: 40
+
+  redis:
+    image: redis:7
+    command: ["redis-server", "--appendonly", "yes"]
+    ports: ["6379:6379"]
+    volumes: ["rds:/data"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 40
+
+  auth-svc:
+    build: { context: ., dockerfile: ./dev/auth-svc/Dockerfile }
+    env_file: [ ./.env.shared, ./.env.auth ]
+    depends_on:
+      postgres: { condition: service_healthy }
+    ports: ["8080:8080"]
+
+  sites-svc:
+    build: { context: ., dockerfile: ./dev/sites-svc/Dockerfile }
+    env_file: [ ./.env.shared, ./.env.sites ]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    ports: ["8081:8081"]
+
+  jobs-svc:
+    build: { context: ., dockerfile: ./dev/jobs-svc/Dockerfile }
+    env_file: [ ./.env.shared, ./.env.jobs ]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    volumes:
+      - ./data:/data           # GeoLite *.mmdb положишь сюда
+    ports: ["8082:8082"]
+
+  api-gw:
+    build: { context: ., dockerfile: ./dev/api-gw/Dockerfile }
+    env_file: [ ./.env.shared, ./.env.gateway ]
+    depends_on:
+      auth-svc:  { condition: service_started }
+      sites-svc: { condition: service_started }
+      jobs-svc:  { condition: service_started }
+    ports: ["8088:8088"]
+
+volumes:
+  pg:
+  rds:

@@ -8,3 +8,32 @@ target/
 
 # MSVC Windows builds of rustc generate these, which store debugging information
 *.pdb
+
+# --- OS / IDE ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.iml
+
+# --- Go ---
+/bin/
+/build/
+/dist/
+/out/
+/coverage/
+/tmp/
+*.coverprofile
+*.test
+# если используете go generate → артефакты сюда
+gen/
+
+
+# --- Logs ---
+*.log
+logs/
+
+# --- Docker ---
+# локальные данные контейнеров (БД/кеш)
+pgdata/
+rdsdata/

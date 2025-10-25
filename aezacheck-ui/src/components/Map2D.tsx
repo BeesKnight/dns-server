@@ -299,9 +299,17 @@ export default function Map2D({ offsetTop = 0 }: Props) {
   }, []);
 
   const projection: GeoProjection = useMemo(() => {
-    const p = geoMercator().translate([w / 2, h / 2]);
-    const s = (w / (2 * Math.PI)) * 0.95 * (h / (w || 1) > 0.45 ? 1 : 0.9);
-    return p.scale(s);
+    const mercator = geoMercator().center([0, 0]);
+    if (w <= 0 || h <= 0) {
+      return mercator.translate([0, 0]).scale(1);
+    }
+
+    const scaleForWidth = (w / (2 * Math.PI)) * 0.95;
+    const scaleForHeight = (h / Math.PI) * 0.95;
+
+    return mercator
+      .translate([w / 2, h / 2])
+      .scale(Math.min(scaleForWidth, scaleForHeight));
   }, [w, h]);
 
   const path = useMemo(() => geoPath(projection), [projection]);
@@ -390,7 +398,7 @@ export default function Map2D({ offsetTop = 0 }: Props) {
   const onEnterCountry = (e: ReactMouseEvent<SVGPathElement>, f: WorldFeature) => {
     const name = f.properties?.NAME || f.properties?.name || "";
     const svgRect = (e.currentTarget as SVGPathElement).ownerSVGElement!.getBoundingClientRect();
-    setHover({ name, x: e.clientX - svgRect.left + 12, y: e.clientY - svgRect.top + 12 });
+    setHover({ type: "country", name, x: e.clientX - svgRect.left + 12, y: e.clientY - svgRect.top + 12 });
   };
   const onLeaveCountry = () => setHover(null);
   const onSvgMove = (e: ReactMouseEvent<SVGSVGElement>) => {
@@ -427,17 +435,14 @@ export default function Map2D({ offsetTop = 0 }: Props) {
   };
 
   return (
-    <div
-      // <<<<<< вот эти две строки опускают карту и сохраняют высоту
-      style={{ marginTop: offsetTop, height: `calc(100% - ${offsetTop}px)` }}
-      className="w-full"
-    >
+    <div style={{ marginTop: offsetTop }} className="w-full">
       <div
         ref={wrapRef}
         style={{
           position: "relative",
           width: "100%",
-          height: "100%",
+          aspectRatio: "2 / 1",
+          minHeight: 360,
           overflow: "hidden",
           borderRadius: 12,
           background: "radial-gradient(circle at 20% 30%, rgba(34,197,247,0.22), transparent 55%), radial-gradient(circle at 80% 15%, rgba(56,189,248,0.18), transparent 60%), linear-gradient(180deg,#050b1a 0%, #09142a 55%, #03070f 100%)"

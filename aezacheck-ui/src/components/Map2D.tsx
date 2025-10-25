@@ -1,6 +1,10 @@
 // src/components/Map2D.tsx
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { MouseEvent as ReactMouseEvent } from "react";
+import type {
+  MouseEvent as ReactMouseEvent,
+  PointerEvent as ReactPointerEvent,
+  WheelEvent as ReactWheelEvent
+} from "react";
 import {
   geoMercator,
   geoPath,
@@ -258,6 +262,15 @@ export default function Map2D({ offsetTop = 0 }: Props) {
   const idRef = useRef(0);
   const [nodeDensity, setNodeDensity] = useState(0.9);
   const [speedMultiplier, setSpeedMultiplier] = useState(1);
+  const [viewTransform, setViewTransform] = useState({ x: 0, y: 0, k: 1 });
+  const [isPanning, setIsPanning] = useState(false);
+  const panStateRef = useRef<{
+    pointerId: number | null;
+    startX: number;
+    startY: number;
+    originX: number;
+    originY: number;
+  }>({ pointerId: null, startX: 0, startY: 0, originX: 0, originY: 0 });
 
   useEffect(() => {
     let alive = true;
@@ -401,10 +414,77 @@ export default function Map2D({ offsetTop = 0 }: Props) {
     setHover({ type: "country", name, x: e.clientX - svgRect.left + 12, y: e.clientY - svgRect.top + 12 });
   };
   const onLeaveCountry = () => setHover(null);
-  const onSvgMove = (e: ReactMouseEvent<SVGSVGElement>) => {
-    if (!hover) return;
-    const r = e.currentTarget.getBoundingClientRect();
-    setHover({ ...hover, x: e.clientX - r.left + 12, y: e.clientY - r.top + 12 });
+  const updateHoverPosition = (e: ReactMouseEvent<SVGSVGElement> | ReactPointerEvent<SVGSVGElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    setHover((prev) => {
+      if (!prev) return prev;
+      return { ...prev, x: e.clientX - rect.left + 12, y: e.clientY - rect.top + 12 };
+    });
+  };
+
+  const handleWheel = (e: ReactWheelEvent<SVGSVGElement>) => {
+    e.preventDefault();
+    const delta = e.deltaY;
+    if (delta === 0) return;
+
+    const zoomFactor = delta > 0 ? 0.9 : 1.1;
+    const minZoom = 0.75;
+    const maxZoom = 4.5;
+    setViewTransform((prev) => {
+      const nextK = Math.max(minZoom, Math.min(maxZoom, prev.k * zoomFactor));
+      const ratio = nextK / prev.k;
+      const rect = e.currentTarget.getBoundingClientRect();
+      const pointerX = e.clientX - rect.left;
+      const pointerY = e.clientY - rect.top;
+      const nextX = pointerX - (pointerX - prev.x) * ratio;
+      const nextY = pointerY - (pointerY - prev.y) * ratio;
+      return { x: nextX, y: nextY, k: nextK };
+    });
+  };
+
+  const handlePointerDown = (e: ReactPointerEvent<SVGSVGElement>) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const svg = e.currentTarget;
+    svg.setPointerCapture(e.pointerId);
+    panStateRef.current = {
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startY: e.clientY,
+      originX: viewTransform.x,
+      originY: viewTransform.y
+    };
+    setIsPanning(true);
+  };
+
+  const handlePointerMove = (e: ReactPointerEvent<SVGSVGElement>) => {
+    updateHoverPosition(e);
+    const panState = panStateRef.current;
+    if (panState.pointerId !== null) {
+      const dx = e.clientX - panState.startX;
+      const dy = e.clientY - panState.startY;
+      setViewTransform((prev) => ({ ...prev, x: panState.originX + dx, y: panState.originY + dy }));
+    }
+  };
+
+  const endPan = (e: ReactPointerEvent<SVGSVGElement>) => {
+    const panState = panStateRef.current;
+    if (panState.pointerId !== e.pointerId) return;
+    e.currentTarget.releasePointerCapture(e.pointerId);
+    panStateRef.current = { pointerId: null, startX: 0, startY: 0, originX: 0, originY: 0 };
+    setIsPanning(false);
+  };
+
+  const handlePointerUp = (e: ReactPointerEvent<SVGSVGElement>) => {
+    endPan(e);
+    updateHoverPosition(e);
+  };
+
+  const handlePointerLeave = (e: ReactPointerEvent<SVGSVGElement>) => {
+    if (panStateRef.current.pointerId !== null) {
+      endPan(e);
+    }
+    setHover(null);
   };
 
   const handleNodeEnter = (
@@ -473,7 +553,16 @@ export default function Map2D({ offsetTop = 0 }: Props) {
             }
           `}
         </style>
-        <svg width={w} height={h} onMouseMove={onSvgMove} onMouseLeave={() => setHover(null)}>
+        <svg
+          width={w}
+          height={h}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerLeave={handlePointerLeave}
+          onWheel={handleWheel}
+          style={{ cursor: isPanning ? "grabbing" : "grab", touchAction: "none" }}
+        >
           <defs>
             <radialGradient id="oceanGlow" cx="50%" cy="45%" r="70%">
               <stop offset="0%" stopColor="rgba(12, 74, 110, 0.85)" />
@@ -521,111 +610,113 @@ export default function Map2D({ offsetTop = 0 }: Props) {
 
           <rect width={w} height={h} fill="url(#oceanGlow)" />
           <rect width={w} height={h} fill="url(#polarGlow)" mask="url(#oceanMask)" opacity={0.6} />
-          <path d={path(graticule) || ""} fill="none" stroke={GRID_STROKE} strokeWidth={0.6} opacity={0.6} />
+          <g transform={`translate(${viewTransform.x},${viewTransform.y}) scale(${viewTransform.k})`}>
+            <path d={path(graticule) || ""} fill="none" stroke={GRID_STROKE} strokeWidth={0.6} opacity={0.6} />
 
-          {worldFc &&
-            (worldFc.features as WorldFeature[]).map((f, i) => (
-              <path
-                key={(f.id as string) || i}
-                d={path(f) || ""}
-                fill={i % 2 === 0 ? LAND_FILL_A : LAND_FILL_B}
-                stroke={BORDER_STROKE}
-                strokeWidth={0.6}
-                filter="url(#landHalo)"
-                style={{ transition: "fill .18s ease" }}
-                onMouseEnter={(e) => onEnterCountry(e, f)}
-                onMouseLeave={onLeaveCountry}
-                onMouseOver={(e) => ((e.currentTarget as SVGPathElement).style.fill = HOVER_FILL)}
-                onMouseOut={(e) =>
-                  ((e.currentTarget as SVGPathElement).style.fill = i % 2 === 0 ? LAND_FILL_A : LAND_FILL_B)
-                }
-              />
-            ))}
-
-          {visibleRoutes.map((route) => {
-            const from = nodeLookup.get(route.from)!;
-            const to = nodeLookup.get(route.to)!;
-            const pathD = createArcPath([from.lng, from.lat], [to.lng, to.lat]);
-            const trailD = createTrailPath([from.lng, from.lat], [to.lng, to.lat]);
-            const dashArray = 180;
-            const duration = `${(8 / speedMultiplier).toFixed(2)}s`;
-            return (
-              <g key={route.id}>
+            {worldFc &&
+              (worldFc.features as WorldFeature[]).map((f, i) => (
                 <path
-                  d={trailD}
-                  fill="none"
-                  stroke={`url(#route-gradient-${route.id})`}
-                  strokeWidth={1.4}
-                  strokeDasharray={`${dashArray}`}
-                  className="map-route-trail"
-                  style={{
-                    animationDuration: duration,
-                    strokeOpacity: 0.55,
-                    strokeDashoffset: dashArray
-                  }}
-                  onMouseEnter={(e) => handleRouteEnter(e, route)}
-                  onMouseLeave={() => setHover(null)}
-                />
-                <path
-                  d={pathD}
-                  fill="none"
-                  stroke={`url(#route-gradient-${route.id})`}
-                  strokeWidth={2.4}
-                  strokeOpacity={0.85}
+                  key={(f.id as string) || i}
+                  d={path(f) || ""}
+                  fill={i % 2 === 0 ? LAND_FILL_A : LAND_FILL_B}
+                  stroke={BORDER_STROKE}
+                  strokeWidth={0.6}
                   filter="url(#landHalo)"
-                  onMouseEnter={(e) => handleRouteEnter(e, route)}
-                  onMouseLeave={() => setHover(null)}
+                  style={{ transition: "fill .18s ease" }}
+                  onMouseEnter={(e) => onEnterCountry(e, f)}
+                  onMouseLeave={onLeaveCountry}
+                  onMouseOver={(e) => ((e.currentTarget as SVGPathElement).style.fill = HOVER_FILL)}
+                  onMouseOut={(e) =>
+                    ((e.currentTarget as SVGPathElement).style.fill = i % 2 === 0 ? LAND_FILL_A : LAND_FILL_B)
+                  }
                 />
-              </g>
-            );
-          })}
+              ))}
 
-          {visibleNodes.map((node, idx) => {
-            const [x, y] = projectPoint(node.lng, node.lat);
-            const pulseDuration = `${(4.5 / (speedMultiplier * (0.6 + node.importance))).toFixed(2)}s`;
-            const markerSize = 4 + node.importance * 4;
-            return (
-              <g key={node.id} transform={`translate(${x},${y})`}>
-                <circle
-                  r={markerSize * 1.9}
-                  fill={`rgba(56,189,248,${0.12 + idx * 0.03})`}
-                  opacity={0.65}
-                />
-                <circle
-                  r={markerSize * 1.3}
-                  fill="rgba(14,165,233,0.35)"
-                  className="map-node"
-                  style={{ animationDuration: pulseDuration, animationDelay: `${idx * 0.25}s` }}
-                />
-                <circle
-                  r={markerSize}
-                  fill="#e0f2fe"
-                  stroke="#38bdf8"
-                  strokeWidth={1.2}
-                  className="map-node"
-                  style={{ animationDuration: pulseDuration, animationDelay: `${idx * 0.25}s` }}
-                  onMouseEnter={(e) => handleNodeEnter(e, node)}
-                  onMouseLeave={() => setHover(null)}
-                />
-              </g>
-            );
-          })}
+            {visibleRoutes.map((route) => {
+              const from = nodeLookup.get(route.from)!;
+              const to = nodeLookup.get(route.to)!;
+              const pathD = createArcPath([from.lng, from.lat], [to.lng, to.lat]);
+              const trailD = createTrailPath([from.lng, from.lat], [to.lng, to.lat]);
+              const dashArray = 180;
+              const duration = `${(8 / speedMultiplier).toFixed(2)}s`;
+              return (
+                <g key={route.id}>
+                  <path
+                    d={trailD}
+                    fill="none"
+                    stroke={`url(#route-gradient-${route.id})`}
+                    strokeWidth={1.4}
+                    strokeDasharray={`${dashArray}`}
+                    className="map-route-trail"
+                    style={{
+                      animationDuration: duration,
+                      strokeOpacity: 0.55,
+                      strokeDashoffset: dashArray
+                    }}
+                    onMouseEnter={(e) => handleRouteEnter(e, route)}
+                    onMouseLeave={() => setHover(null)}
+                  />
+                  <path
+                    d={pathD}
+                    fill="none"
+                    stroke={`url(#route-gradient-${route.id})`}
+                    strokeWidth={2.4}
+                    strokeOpacity={0.85}
+                    filter="url(#landHalo)"
+                    onMouseEnter={(e) => handleRouteEnter(e, route)}
+                    onMouseLeave={() => setHover(null)}
+                  />
+                </g>
+              );
+            })}
 
-          {attacks.map((a) => {
-            const d = createArcPath(a.from, a.to);
-            return (
-              <path
-                key={a.id}
-                data-attack-id={a.id}
-                d={d}
-                fill="none"
-                stroke={ATTACK_COLOR}
-                strokeWidth={ATTACK_WIDTH}
-                strokeLinecap="round"
-                style={{ opacity: 0 }}
-              />
-            );
-          })}
+            {visibleNodes.map((node, idx) => {
+              const [x, y] = projectPoint(node.lng, node.lat);
+              const pulseDuration = `${(4.5 / (speedMultiplier * (0.6 + node.importance))).toFixed(2)}s`;
+              const markerSize = 4 + node.importance * 4;
+              return (
+                <g key={node.id} transform={`translate(${x},${y})`}>
+                  <circle
+                    r={markerSize * 1.9}
+                    fill={`rgba(56,189,248,${0.12 + idx * 0.03})`}
+                    opacity={0.65}
+                  />
+                  <circle
+                    r={markerSize * 1.3}
+                    fill="rgba(14,165,233,0.35)"
+                    className="map-node"
+                    style={{ animationDuration: pulseDuration, animationDelay: `${idx * 0.25}s` }}
+                  />
+                  <circle
+                    r={markerSize}
+                    fill="#e0f2fe"
+                    stroke="#38bdf8"
+                    strokeWidth={1.2}
+                    className="map-node"
+                    style={{ animationDuration: pulseDuration, animationDelay: `${idx * 0.25}s` }}
+                    onMouseEnter={(e) => handleNodeEnter(e, node)}
+                    onMouseLeave={() => setHover(null)}
+                  />
+                </g>
+              );
+            })}
+
+            {attacks.map((a) => {
+              const d = createArcPath(a.from, a.to);
+              return (
+                <path
+                  key={a.id}
+                  data-attack-id={a.id}
+                  d={d}
+                  fill="none"
+                  stroke={ATTACK_COLOR}
+                  strokeWidth={ATTACK_WIDTH}
+                  strokeLinecap="round"
+                  style={{ opacity: 0 }}
+                />
+              );
+            })}
+          </g>
         </svg>
 
         {hover && (

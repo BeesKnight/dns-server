@@ -1,10 +1,6 @@
 // src/components/Map2D.tsx
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type {
-  MouseEvent as ReactMouseEvent,
-  PointerEvent as ReactPointerEvent,
-  WheelEvent as ReactWheelEvent
-} from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { MouseEvent as ReactMouseEvent } from "react";
 import {
   geoMercator,
   geoPath,
@@ -28,8 +24,6 @@ const ATTACK_LIFETIME_MS = 2000;
 
 type WorldFeature = Feature<Polygon | MultiPolygon, { NAME?: string; name?: string }>;
 type Attack = { id: number; from: [number, number]; to: [number, number]; };
-
-type ViewTransform = { x: number; y: number; k: number };
 
 type NetworkNode = {
   id: string;
@@ -264,15 +258,6 @@ export default function Map2D({ offsetTop = 0 }: Props) {
   const idRef = useRef(0);
   const [nodeDensity, setNodeDensity] = useState(0.9);
   const [speedMultiplier, setSpeedMultiplier] = useState(1);
-  const [viewTransform, setViewTransform] = useState<ViewTransform>({ x: 0, y: 0, k: 1 });
-  const [isPanning, setIsPanning] = useState(false);
-  const panStateRef = useRef<{
-    pointerId: number | null;
-    startX: number;
-    startY: number;
-    originX: number;
-    originY: number;
-  }>({ pointerId: null, startX: 0, startY: 0, originX: 0, originY: 0 });
 
   useEffect(() => {
     let alive = true;
@@ -329,80 +314,6 @@ export default function Map2D({ offsetTop = 0 }: Props) {
 
   const path = useMemo(() => geoPath(projection), [projection]);
   const graticule = useMemo(() => geoGraticule10(), []);
-
-  const worldBounds = useMemo(() => {
-    if (!worldFc) return null;
-    const [[minX, minY], [maxX, maxY]] = path.bounds(worldFc);
-    if (
-      !Number.isFinite(minX) ||
-      !Number.isFinite(minY) ||
-      !Number.isFinite(maxX) ||
-      !Number.isFinite(maxY)
-    ) {
-      return null;
-    }
-    return { minX, minY, maxX, maxY };
-  }, [worldFc, path]);
-
-  const clampViewTransform = useCallback(
-    (next: ViewTransform): ViewTransform => {
-      const sanitized: ViewTransform = {
-        x: Number.isFinite(next.x) ? next.x : 0,
-        y: Number.isFinite(next.y) ? next.y : 0,
-        k: Number.isFinite(next.k) && next.k > 0 ? next.k : 1
-      };
-
-      if (!worldBounds || w <= 0 || h <= 0) {
-        return sanitized;
-      }
-
-      const margin = Math.min(w, h) * 0.08 + 24;
-      const minXBound = margin - sanitized.k * worldBounds.minX;
-      const maxXBound = w - margin - sanitized.k * worldBounds.maxX;
-      const minYBound = margin - sanitized.k * worldBounds.minY;
-      const maxYBound = h - margin - sanitized.k * worldBounds.maxY;
-
-      const clampValue = (value: number, min: number, max: number) => {
-        if (min > max) {
-          return (min + max) / 2;
-        }
-        if (!Number.isFinite(value)) {
-          return (min + max) / 2;
-        }
-        return Math.min(Math.max(value, min), max);
-      };
-
-      return {
-        x: clampValue(sanitized.x, minXBound, maxXBound),
-        y: clampValue(sanitized.y, minYBound, maxYBound),
-        k: sanitized.k
-      };
-    },
-    [worldBounds, w, h]
-  );
-
-  const updateViewTransform = useCallback(
-    (updater: (prev: ViewTransform) => ViewTransform) => {
-      setViewTransform((prev) => {
-        const next = clampViewTransform(updater(prev));
-        if (next.x === prev.x && next.y === prev.y && next.k === prev.k) {
-          return prev;
-        }
-        return next;
-      });
-    },
-    [clampViewTransform]
-  );
-
-  useEffect(() => {
-    setViewTransform((prev) => {
-      const next = clampViewTransform(prev);
-      if (next.x === prev.x && next.y === prev.y && next.k === prev.k) {
-        return prev;
-      }
-      return next;
-    });
-  }, [clampViewTransform]);
 
   const sortedNodes = useMemo(() => [...BASE_NODES].sort((a, b) => b.importance - a.importance), []);
   const visibleNodes = useMemo(() => {
@@ -490,81 +401,14 @@ export default function Map2D({ offsetTop = 0 }: Props) {
     setHover({ type: "country", name, x: e.clientX - svgRect.left + 12, y: e.clientY - svgRect.top + 12 });
   };
   const onLeaveCountry = () => setHover(null);
-  const updateHoverPosition = (e: ReactMouseEvent<SVGSVGElement> | ReactPointerEvent<SVGSVGElement>) => {
+  const onSvgMove = (e: ReactMouseEvent<SVGSVGElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
     setHover((prev) => {
       if (!prev) return prev;
       return { ...prev, x: e.clientX - rect.left + 12, y: e.clientY - rect.top + 12 };
     });
   };
-
-  const handleWheel = (e: ReactWheelEvent<SVGSVGElement>) => {
-    e.preventDefault();
-    const delta = e.deltaY;
-    if (delta === 0) return;
-
-    const zoomFactor = delta > 0 ? 0.9 : 1.1;
-    const minZoom = 0.75;
-    const maxZoom = 4.5;
-    updateViewTransform((prev) => {
-      const nextK = Math.max(minZoom, Math.min(maxZoom, prev.k * zoomFactor));
-      if (nextK === prev.k) {
-        return prev;
-      }
-      const ratio = nextK / prev.k;
-      const rect = e.currentTarget.getBoundingClientRect();
-      const pointerX = e.clientX - rect.left;
-      const pointerY = e.clientY - rect.top;
-      const nextX = pointerX - (pointerX - prev.x) * ratio;
-      const nextY = pointerY - (pointerY - prev.y) * ratio;
-      return { x: nextX, y: nextY, k: nextK };
-    });
-  };
-
-  const handlePointerDown = (e: ReactPointerEvent<SVGSVGElement>) => {
-    if (e.button !== 0) return;
-    e.preventDefault();
-    const svg = e.currentTarget;
-    svg.setPointerCapture(e.pointerId);
-    panStateRef.current = {
-      pointerId: e.pointerId,
-      startX: e.clientX,
-      startY: e.clientY,
-      originX: viewTransform.x,
-      originY: viewTransform.y
-    };
-    setIsPanning(true);
-  };
-
-  const handlePointerMove = (e: ReactPointerEvent<SVGSVGElement>) => {
-    updateHoverPosition(e);
-    const panState = panStateRef.current;
-    if (panState.pointerId !== null) {
-      const dx = e.clientX - panState.startX;
-      const dy = e.clientY - panState.startY;
-      updateViewTransform((prev) => ({ x: panState.originX + dx, y: panState.originY + dy, k: prev.k }));
-    }
-  };
-
-  const endPan = (e: ReactPointerEvent<SVGSVGElement>) => {
-    const panState = panStateRef.current;
-    if (panState.pointerId !== e.pointerId) return;
-    e.currentTarget.releasePointerCapture(e.pointerId);
-    panStateRef.current = { pointerId: null, startX: 0, startY: 0, originX: 0, originY: 0 };
-    setIsPanning(false);
-  };
-
-  const handlePointerUp = (e: ReactPointerEvent<SVGSVGElement>) => {
-    endPan(e);
-    updateHoverPosition(e);
-  };
-
-  const handlePointerLeave = (e: ReactPointerEvent<SVGSVGElement>) => {
-    if (panStateRef.current.pointerId !== null) {
-      endPan(e);
-    }
-    setHover(null);
-  };
+  const onSvgLeave = () => setHover(null);
 
   const handleNodeEnter = (
     e: ReactMouseEvent<SVGCircleElement>,
@@ -632,16 +476,7 @@ export default function Map2D({ offsetTop = 0 }: Props) {
             }
           `}
         </style>
-        <svg
-          width={w}
-          height={h}
-          onPointerDown={handlePointerDown}
-          onPointerMove={handlePointerMove}
-          onPointerUp={handlePointerUp}
-          onPointerLeave={handlePointerLeave}
-          onWheel={handleWheel}
-          style={{ cursor: isPanning ? "grabbing" : "grab", touchAction: "none" }}
-        >
+        <svg width={w} height={h} onMouseMove={onSvgMove} onMouseLeave={onSvgLeave}>
           <defs>
             <radialGradient id="oceanGlow" cx="50%" cy="45%" r="70%">
               <stop offset="0%" stopColor="rgba(12, 74, 110, 0.85)" />
@@ -689,7 +524,7 @@ export default function Map2D({ offsetTop = 0 }: Props) {
 
           <rect width={w} height={h} fill="url(#oceanGlow)" />
           <rect width={w} height={h} fill="url(#polarGlow)" mask="url(#oceanMask)" opacity={0.6} />
-          <g transform={`translate(${viewTransform.x},${viewTransform.y}) scale(${viewTransform.k})`}>
+          <g>
             <path d={path(graticule) || ""} fill="none" stroke={GRID_STROKE} strokeWidth={0.6} opacity={0.6} />
 
             {worldFc &&

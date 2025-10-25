@@ -1,0 +1,51 @@
+version: 1
+
+workflows:
+  ansible:
+    name: Ansible lint and dry-run
+    triggers:
+      push:
+        branches:
+          - main
+        changes:
+          - playbooks/**
+          - inventories/**
+          - group_vars/**
+          - infra/roles/**
+          - ansible.cfg
+          - Makefile
+          - .sourcecraft/pipeline.yml
+      merge_request:
+        changes:
+          - playbooks/**
+          - inventories/**
+          - group_vars/**
+          - infra/roles/**
+          - ansible.cfg
+          - Makefile
+          - .sourcecraft/pipeline.yml
+    agent:
+      machine:
+        image: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: sourcecraft/checkout@v1
+
+      - name: Set up Python 3.11
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3 python3-pip python3-venv
+          python3 -m venv .venv
+          . .venv/bin/activate
+          python -m pip install --upgrade pip
+          pip install 'ansible>=9.0.0' 'ansible-lint>=24.2.0'
+
+      - name: Run ansible-lint
+        run: |
+          . .venv/bin/activate
+          ansible-lint playbooks/site.yml
+
+      - name: Dry-run local inventory
+        run: |
+          . .venv/bin/activate
+          ansible-playbook -i inventories/local playbooks/site.yml --check -e orchestration_skip_deploy=true

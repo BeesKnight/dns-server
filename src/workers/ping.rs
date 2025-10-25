@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use serde_json::json;
-use tokio::net::TcpStream;
+use tokio::net::TcpSocket;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::{self, Instant};
 use tokio_util::sync::CancellationToken;
@@ -17,6 +17,7 @@ use tracing::{debug, warn};
 
 use crate::control_plane::{Observation, TaskSpec};
 use crate::dispatcher::LeaseAssignment;
+use crate::runtime::SocketConfigurator;
 
 use super::{WorkerHandler, WorkerReport};
 
@@ -33,12 +34,13 @@ mod unix {
     use tokio_util::sync::CancellationToken;
 
     use super::IcmpOutcome;
+    use crate::runtime::SocketConfigurator;
 
     #[derive(Clone, Debug, Default)]
     pub struct IcmpSocket;
 
     impl IcmpSocket {
-        pub fn new(_address: &SocketAddr) -> Result<Self> {
+        pub fn new(_address: &SocketAddr, _configurator: &SocketConfigurator) -> Result<Self> {
             Ok(Self)
         }
 
@@ -69,25 +71,47 @@ const MIN_INTERVAL: Duration = Duration::from_micros(1);
 pub struct PingWorker {
     engine: Arc<dyn PingEngine>,
     limiter: Arc<PingRateLimiter>,
+    configurator: SocketConfigurator,
 }
 
 impl PingWorker {
-    pub(crate) fn new(engine: Arc<dyn PingEngine>, limiter: Arc<PingRateLimiter>) -> Self {
-        Self { engine, limiter }
+    pub(crate) fn new(
+        engine: Arc<dyn PingEngine>,
+        limiter: Arc<PingRateLimiter>,
+        configurator: SocketConfigurator,
+    ) -> Self {
+        Self {
+            engine,
+            limiter,
+            configurator,
+        }
     }
 
     pub fn with_engine(engine: Arc<dyn PingEngine>) -> Self {
+        Self::with_engine_and_config(engine, SocketConfigurator::default())
+    }
+
+    pub fn with_engine_and_config(
+        engine: Arc<dyn PingEngine>,
+        configurator: SocketConfigurator,
+    ) -> Self {
         Self::new(
             engine,
             Arc::new(PingRateLimiter::new(DEFAULT_RATE_PER_SECOND as usize)),
+            configurator,
         )
     }
 }
 
 impl Default for PingWorker {
     fn default() -> Self {
-        let engine: Arc<dyn PingEngine> = Arc::new(SystemPingEngine::default());
-        Self::with_engine(engine)
+        let configurator = SocketConfigurator::default();
+        let engine: Arc<dyn PingEngine> = Arc::new(SystemPingEngine::new(configurator.clone()));
+        Self::new(
+            engine,
+            Arc::new(PingRateLimiter::new(DEFAULT_RATE_PER_SECOND as usize)),
+            configurator,
+        )
     }
 }
 
@@ -167,7 +191,10 @@ impl WorkerHandler for PingWorker {
                 timeout,
             };
 
-            let result = self.engine.probe(request, token.clone()).await;
+            let result = self
+                .engine
+                .probe(request, token.clone(), self.configurator.clone())
+                .await;
             permit.release_with_delay(interval);
 
             let observation = PingObservation::from_outcome(index, result);
@@ -509,23 +536,34 @@ pub struct PingRequest {
 
 #[async_trait]
 pub trait PingEngine: Send + Sync {
-    async fn probe(&self, request: PingRequest, cancel: CancellationToken) -> PingProbeOutcome;
+    async fn probe(
+        &self,
+        request: PingRequest,
+        cancel: CancellationToken,
+        configurator: SocketConfigurator,
+    ) -> PingProbeOutcome;
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct SystemPingEngine {
     identifier: Arc<AtomicU16>,
+    configurator: SocketConfigurator,
 }
 
 #[async_trait]
 impl PingEngine for SystemPingEngine {
-    async fn probe(&self, request: PingRequest, cancel: CancellationToken) -> PingProbeOutcome {
+    async fn probe(
+        &self,
+        request: PingRequest,
+        cancel: CancellationToken,
+        configurator: SocketConfigurator,
+    ) -> PingProbeOutcome {
         let identifier = self.identifier.fetch_add(1, Ordering::Relaxed);
-        let socket = match IcmpSocket::new(&request.address) {
+        let socket = match IcmpSocket::new(&request.address, &self.configurator) {
             Ok(socket) => socket,
             Err(err) => {
                 warn!("failed to create ICMP socket: {err}");
-                return tcp_syn_probe(request, cancel).await;
+                return tcp_syn_probe(request, cancel, configurator).await;
             }
         };
 
@@ -570,9 +608,24 @@ impl PingEngine for SystemPingEngine {
             },
             Err(err) => {
                 warn!("ICMP probe failed: {err}");
-                tcp_syn_probe(request, cancel).await
+                tcp_syn_probe(request, cancel, configurator).await
             }
         }
+    }
+}
+
+impl SystemPingEngine {
+    pub fn new(configurator: SocketConfigurator) -> Self {
+        Self {
+            identifier: Arc::new(AtomicU16::new(0)),
+            configurator,
+        }
+    }
+}
+
+impl Default for SystemPingEngine {
+    fn default() -> Self {
+        Self::new(SocketConfigurator::default())
     }
 }
 
@@ -599,13 +652,32 @@ fn build_payload() -> Vec<u8> {
     (0u8..56u8).collect()
 }
 
-async fn tcp_syn_probe(request: PingRequest, cancel: CancellationToken) -> PingProbeOutcome {
+async fn tcp_syn_probe(
+    request: PingRequest,
+    cancel: CancellationToken,
+    configurator: SocketConfigurator,
+) -> PingProbeOutcome {
     let start = Instant::now();
     let target = match request.address {
         SocketAddr::V4(addr) => SocketAddr::new(IpAddr::V4(*addr.ip()), 80),
         SocketAddr::V6(addr) => SocketAddr::new(IpAddr::V6(*addr.ip()), 80),
     };
-    let connect = TcpStream::connect(target);
+    let socket = match target {
+        SocketAddr::V4(_) => TcpSocket::new_v4(),
+        SocketAddr::V6(_) => TcpSocket::new_v6(),
+    };
+    let socket = match socket {
+        Ok(socket) => socket,
+        Err(err) => {
+            return PingProbeOutcome::Error {
+                address: Some(target),
+                error: err.to_string(),
+                protocol: PingProtocol::TcpSyn,
+            };
+        }
+    };
+    configurator.configure_tcp_client(&socket);
+    let connect = socket.connect(target);
     let timeout = request.timeout;
     tokio::select! {
         _ = cancel.cancelled() => {

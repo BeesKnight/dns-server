@@ -19,22 +19,24 @@ use tokio::time::{self, Instant};
 use tokio_util::sync::CancellationToken;
 
 use super::IcmpOutcome;
+use crate::runtime::SocketConfigurator;
 
 pub struct IcmpSocket {
     inner: AsyncFd<Socket>,
 }
 
 impl IcmpSocket {
-    pub fn new(address: &SocketAddr) -> Result<Self> {
+    pub fn new(address: &SocketAddr, configurator: &SocketConfigurator) -> Result<Self> {
         match address {
-            SocketAddr::V4(_) => Self::new_v4(),
+            SocketAddr::V4(_) => Self::new_v4(configurator),
             SocketAddr::V6(_) => Err(anyhow!("IPv6 ICMP is not supported")),
         }
     }
 
-    fn new_v4() -> Result<Self> {
+    fn new_v4(configurator: &SocketConfigurator) -> Result<Self> {
         let socket = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4))
             .context("failed to create ICMP socket")?;
+        configurator.configure_raw_socket(&socket);
         socket
             .set_nonblocking(true)
             .context("failed to configure ICMP socket as non-blocking")?;

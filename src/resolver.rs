@@ -15,10 +15,13 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpStream, UdpSocket},
     sync::{Mutex, Notify},
-    time::{sleep, timeout},
+    time::timeout,
 };
+use tracing::warn;
 
-use crate::{BytePacketBuf, Dns, DnsRecord, QueryType, ResultCode, MAX_PACKET_SIZE};
+use crate::{
+    runtime::TimerService, BytePacketBuf, Dns, DnsRecord, QueryType, ResultCode, MAX_PACKET_SIZE,
+};
 
 static NEXT_MESSAGE_ID: AtomicU16 = AtomicU16::new(0);
 
@@ -72,6 +75,7 @@ pub struct DnsResolver {
     timeout: Duration,
     cache: Cache<String, Arc<Resolution>>,
     singleflight: Arc<Mutex<HashMap<String, SingleflightEntry>>>,
+    timer: TimerService,
 }
 
 struct SingleflightEntry {
@@ -81,6 +85,10 @@ struct SingleflightEntry {
 
 impl DnsResolver {
     pub fn new(upstream: SocketAddr, timeout: Duration) -> Self {
+        Self::with_timer(upstream, timeout, TimerService::new())
+    }
+
+    pub fn with_timer(upstream: SocketAddr, timeout: Duration, timer: TimerService) -> Self {
         Self {
             upstream,
             timeout,
@@ -88,6 +96,7 @@ impl DnsResolver {
                 .time_to_live(Duration::from_secs(DEFAULT_TTL_SECS as u64))
                 .build(),
             singleflight: Arc::new(Mutex::new(HashMap::new())),
+            timer,
         }
     }
 
@@ -130,9 +139,13 @@ impl DnsResolver {
                     let cache = self.cache.clone();
                     let key_for_task = key.clone();
                     let ttl = resolution.ttl;
+                    let timer = self.timer.clone();
                     tokio::spawn(async move {
-                        sleep(ttl).await;
-                        cache.invalidate(&key_for_task).await;
+                        if timer.sleep(ttl).await.is_ok() {
+                            cache.invalidate(&key_for_task).await;
+                        } else {
+                            warn!(key = %key_for_task, "ttl eviction timer shut down before firing");
+                        }
                     });
                 }
             }

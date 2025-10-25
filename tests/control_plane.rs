@@ -51,6 +51,7 @@ impl ControlPlaneTransport for MockBackendTransport {
             agent_id: registration.agent_id.0,
             lease_duration_ms: duration_to_millis(registration.lease_duration),
             heartbeat_timeout_ms: duration_to_millis(registration.heartbeat_timeout),
+            token: registration.token.clone(),
         })
     }
 
@@ -167,6 +168,7 @@ async fn client_handles_lease_lifecycle() -> Result<(), ControlPlaneError> {
         })
         .await?;
     assert_eq!(registration.agent_id, 1);
+    assert_eq!(registration.token.as_deref(), Some("token-1"));
 
     let mut capacities = HashMap::new();
     capacities.insert(TaskKind::Dns, 2);

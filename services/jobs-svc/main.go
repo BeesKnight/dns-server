@@ -18,6 +18,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -53,6 +54,7 @@ type Config struct {
 	MapPubChannel   string // "map:events"
 	MapStream       string // "map_events"
 	MapStreamMaxLen int    // MaxLenApprox для истории
+	GeoCacheTTL     time.Duration
 
 	// GeoIP
 	GeoIPDisabled bool
@@ -112,6 +114,7 @@ func loadConfig() Config {
 		MapPubChannel:   env("MAP_PUB_CHANNEL", "map:events"),
 		MapStream:       env("MAP_STREAM", "map_events"),
 		MapStreamMaxLen: ienv("MAP_STREAM_MAXLEN", 100000),
+		GeoCacheTTL:     denv("GEO_CACHE_TTL", "2m"),
 
 		GeoIPDisabled: benv("GEOIP_DISABLED", false),
 		GeoIPCityPath: env("GEOIP_CITY_PATH", "/opt/aezacheck/data/GeoLite2-City.mmdb"),
@@ -134,7 +137,8 @@ type App struct {
 	pool  pgxPool
 	redis *redis.Client
 
-	geo *geoIP // может быть nil (если выключено/файл не найден)
+	geo      *geoIP    // может быть nil (если выключено/файл не найден)
+	geoCache *geoCache // кэш IP→Geo для REST-эндпоинтов
 }
 
 func main() {
@@ -184,6 +188,7 @@ func main() {
 	// карта
 	r.Route("/v1", func(rt chi.Router) {
 		rt.Get("/map/agents", app.handleMapAgents)
+		rt.Get("/map/events", app.handleMapEvents)
 		rt.Get("/map/stream", app.handleMapStream)     // SSE
 		rt.Get("/map/snapshot", app.handleMapSnapshot) // история из Stream
 		rt.Get("/checks/{id}/geo", app.handleCheckGeo)
@@ -231,7 +236,7 @@ func initApp(ctx context.Context, cfg Config, log *slog.Logger) (*App, error) {
 		}
 	}
 
-	return &App{cfg: cfg, log: log, pool: pool, redis: rdb, geo: gip}, nil
+	return &App{cfg: cfg, log: log, pool: pool, redis: rdb, geo: gip, geoCache: newGeoCache(cfg.GeoCacheTTL)}, nil
 }
 
 func (a *App) Close() {
@@ -425,10 +430,11 @@ func (a *App) handleAgentRegister(w http.ResponseWriter, r *http.Request) {
 		id         uuid.UUID
 		externalID int64
 	)
+	agentIP := parseIP(r)
 	err = a.pool.QueryRow(r.Context(),
 		`insert into agents(name, token_hash, location, version, agent_ip, max_parallel, last_seen)
                  values($1,$2,$3,$4,$5,$6,now()) returning id, external_id`,
-		name, string(hash), req.Location, req.Version, parseIP(r), limit).Scan(&id, &externalID)
+		name, string(hash), req.Location, req.Version, agentIP, limit).Scan(&id, &externalID)
 	if err != nil {
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
@@ -445,6 +451,9 @@ func (a *App) handleAgentRegister(w http.ResponseWriter, r *http.Request) {
 		HeartbeatTimeoutMs: heartbeatTimeout.Milliseconds(),
 	}
 	_ = json.NewEncoder(w).Encode(resp)
+
+	a.publishAgentOnline(r.Context(), id, uint64(externalID), name, agentIP, req.Location, req.Version)
+	a.markAgentOnlineSent(r.Context(), id)
 }
 
 func (a *App) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
@@ -460,19 +469,26 @@ func (a *App) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	clientIP := parseIP(r)
+
 	_, err := a.pool.Exec(r.Context(),
 		`update agents set last_seen=now(), version=coalesce(nullif($1,''),version),
                         location=coalesce(nullif($2,''),location), agent_ip=$3 where id=$4`,
-		req.Version, req.Location, parseIP(r), ag.ID)
+		req.Version, req.Location, clientIP, ag.ID)
 	if err != nil {
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
+	ag.IP = net.ParseIP(clientIP)
 	resp := heartbeatResp{
 		AgentID:        ag.ExternalID,
 		NextDeadlineMs: time.Now().Add(a.heartbeatTimeout()).UnixMilli(),
 	}
 	_ = json.NewEncoder(w).Encode(resp)
+
+	if a.shouldEmitAgentOnline(r.Context(), ag.ID) {
+		a.publishAgentOnline(r.Context(), ag.ID, ag.ExternalID, ag.Name, clientIP, req.Location, req.Version)
+	}
 }
 
 /*************** Claim (выдача задач) ***************/
@@ -733,7 +749,7 @@ func (a *App) handleReport(w http.ResponseWriter, r *http.Request) {
 				"agent_id": ag.ID, "task_id": taskID,
 			})
 
-			a.publishMapResult(r.Context(), checkID, siteID, reqIP.String, ag, kind, spec, status, json.RawMessage(payload), mergedMetrics)
+			a.publishMapResult(r.Context(), checkID, siteID, reqIP.String, ag, kind, spec, status, json.RawMessage(payload), mergedMetrics, "")
 
 			_, _ = a.pool.Exec(r.Context(), `delete from leases where external_id=$1`, c.LeaseID)
 			_ = a.redis.Del(r.Context(), leaseKey(streamID)).Err()
@@ -813,10 +829,13 @@ func (a *App) retryLoop() {
 				_ = a.publishUpdate(ctx, it.CheckID, "result", map[string]any{
 					"check_id": it.CheckID, "kind": it.Kind, "status": "cancelled", "reason": "lease_timeout", "retries": it.Retry,
 				})
-				a.publishMapEvent(ctx, mapEvent{
-					Type: "check.result",
-					Data: map[string]any{"check_id": it.CheckID, "kind": it.Kind, "status": "cancelled", "reason": "lease_timeout"},
-				})
+				var siteID uuid.UUID
+				var reqIP sql.NullString
+				_ = a.pool.QueryRow(ctx,
+					`select site_id, request_ip::text from checks where id=$1`, it.CheckID).
+					Scan(&siteID, &reqIP)
+				a.publishMapResult(ctx, it.CheckID, siteID, reqIP.String, nil, it.Kind, it.Spec,
+					"cancelled", json.RawMessage(`{}`), nil, "lease_timeout")
 				continue
 			}
 			time.Sleep(a.cfg.RetryBackoff)
@@ -867,6 +886,62 @@ type geoIP struct {
 	asn  asnDB
 }
 
+type geoCacheEntry struct {
+	value   *Geo
+	ok      bool
+	expires time.Time
+}
+
+type geoCache struct {
+	ttl   time.Duration
+	mu    sync.RWMutex
+	items map[string]geoCacheEntry
+}
+
+func newGeoCache(ttl time.Duration) *geoCache {
+	if ttl <= 0 {
+		return nil
+	}
+	return &geoCache{ttl: ttl, items: make(map[string]geoCacheEntry)}
+}
+
+func (c *geoCache) get(ip string) (*Geo, bool, bool) {
+	if c == nil {
+		return nil, false, false
+	}
+	c.mu.RLock()
+	entry, ok := c.items[ip]
+	c.mu.RUnlock()
+	if !ok {
+		return nil, false, false
+	}
+	if time.Now().After(entry.expires) {
+		c.mu.Lock()
+		delete(c.items, ip)
+		c.mu.Unlock()
+		return nil, false, false
+	}
+	if entry.value == nil {
+		return nil, entry.ok, true
+	}
+	clone := *entry.value
+	return &clone, entry.ok, true
+}
+
+func (c *geoCache) set(ip string, value *Geo, ok bool) {
+	if c == nil {
+		return
+	}
+	var stored *Geo
+	if value != nil {
+		clone := *value
+		stored = &clone
+	}
+	c.mu.Lock()
+	c.items[ip] = geoCacheEntry{value: stored, ok: ok, expires: time.Now().Add(c.ttl)}
+	c.mu.Unlock()
+}
+
 func openGeo(cityPath, asnPath string) (*geoIP, error) {
 	g := &geoIP{}
 	if cityPath != "" {
@@ -897,16 +972,25 @@ func (g *geoIP) Close() {
 }
 
 func (a *App) geoLookup(ipStr string) (*Geo, bool) {
-	if a.geo == nil || strings.TrimSpace(ipStr) == "" {
+	ipStr = strings.TrimSpace(ipStr)
+	if a.geo == nil || ipStr == "" {
 		return nil, false
+	}
+	if cached, ok, found := a.geoCache.get(ipStr); found {
+		return cached, ok
 	}
 	ip := net.ParseIP(ipStr)
 	if ip == nil {
+		if a.geoCache != nil {
+			a.geoCache.set(ipStr, nil, false)
+		}
 		return nil, false
 	}
 	out := &Geo{}
+	var success bool
 	if a.geo.city != nil {
 		if rec, err := a.geo.city.City(ip); err == nil {
+			success = true
 			if rec.Location.Latitude != 0 || rec.Location.Longitude != 0 {
 				out.Lat = rec.Location.Latitude
 				out.Lon = rec.Location.Longitude
@@ -921,8 +1005,18 @@ func (a *App) geoLookup(ipStr string) (*Geo, bool) {
 	}
 	if a.geo.asn != nil {
 		if asn, err := a.geo.asn.ASN(ip); err == nil {
+			success = true
 			out.ASN = int(asn.AutonomousSystemNumber)
 		}
+	}
+	if !success {
+		if a.geoCache != nil {
+			a.geoCache.set(ipStr, nil, false)
+		}
+		return nil, false
+	}
+	if a.geoCache != nil {
+		a.geoCache.set(ipStr, out, true)
 	}
 	return out, true
 }
@@ -932,6 +1026,60 @@ type mapEvent struct {
 	Type string         `json:"type"` // check.start|check.result|check.done|agent.online
 	TS   string         `json:"ts"`
 	Data map[string]any `json:"data"`
+}
+
+func agentOnlineKey(id uuid.UUID) string {
+	return "agent:online:event:" + id.String()
+}
+
+func (a *App) markAgentOnlineSent(ctx context.Context, id uuid.UUID) {
+	if a.redis == nil {
+		return
+	}
+	if err := a.redis.Set(ctx, agentOnlineKey(id), "1", agentOnlineEventTTL).Err(); err != nil && a.log != nil {
+		a.log.Warn("agent_online_event_mark_failed", "err", err)
+	}
+}
+
+func (a *App) shouldEmitAgentOnline(ctx context.Context, id uuid.UUID) bool {
+	if a.redis == nil {
+		return true
+	}
+	ok, err := a.redis.SetNX(ctx, agentOnlineKey(id), "1", agentOnlineEventTTL).Result()
+	if err != nil {
+		if a.log != nil {
+			a.log.Warn("agent_online_event_rate_limit", "err", err)
+		}
+		return true
+	}
+	return ok
+}
+
+func (a *App) publishAgentOnline(ctx context.Context, id uuid.UUID, externalID uint64, name, ip, location, version string) {
+	agent := map[string]any{
+		"id":          id,
+		"external_id": externalID,
+		"name":        name,
+		"status":      "online",
+	}
+	ip = strings.TrimSpace(ip)
+	if ip != "" {
+		agent["ip"] = ip
+		if geo := geoJSON(a, ip); geo != nil {
+			agent["geo"] = geo
+		}
+	}
+	if loc := strings.TrimSpace(location); loc != "" {
+		agent["location"] = loc
+	}
+	if ver := strings.TrimSpace(version); ver != "" {
+		agent["version"] = ver
+	}
+	data := map[string]any{
+		"status": "online",
+		"agent":  agent,
+	}
+	a.publishMapEvent(ctx, mapEvent{Type: "agent.online", Data: data})
 }
 
 func (a *App) publishMapEvent(ctx context.Context, ev mapEvent) {
@@ -1025,20 +1173,54 @@ func (a *App) publishMapStart(ctx context.Context, checkID uuid.UUID, ag *agentA
 	_ = a.pool.QueryRow(ctx, `select site_id, request_ip::text from checks where id=$1`, checkID).Scan(&siteID, &reqIP)
 
 	targetHost, _ := extractTargetFromSpec(kind, spec)
-	ev := mapEvent{
-		Type: "check.start",
-		Data: map[string]any{
-			"check_id": checkID, "site_id": siteID, "kind": kind,
-			"source": map[string]any{"ip": reqIP.String, "geo": geoJSON(a, reqIP.String)},
-			"agent":  map[string]any{"id": ag.ID, "ip": ag.IP.String(), "geo": geoJSON(a, ag.IP.String())},
-			"target": map[string]any{"host": targetHost},
-		},
+	data := map[string]any{
+		"check_id": checkID,
+		"site_id":  siteID,
+		"kind":     kind,
+		"status":   "running",
 	}
-	a.publishMapEvent(ctx, ev)
+	source := map[string]any{}
+	if reqIP.String != "" {
+		source["ip"] = reqIP.String
+		if geo := geoJSON(a, reqIP.String); geo != nil {
+			source["geo"] = geo
+		}
+	}
+	if len(source) > 0 {
+		data["source"] = source
+	}
+	if ag != nil {
+		agent := map[string]any{
+			"id":          ag.ID,
+			"external_id": ag.ExternalID,
+			"name":        ag.Name,
+		}
+		if aip := ipString(ag.IP); aip != "" {
+			agent["ip"] = aip
+			if geo := geoJSON(a, aip); geo != nil {
+				agent["geo"] = geo
+			}
+		}
+		data["agent"] = agent
+	}
+	target := map[string]any{}
+	if targetHost != "" {
+		target["host"] = targetHost
+		if looksIP(targetHost) {
+			target["ip"] = targetHost
+			if geo := geoJSON(a, targetHost); geo != nil {
+				target["geo"] = geo
+			}
+		}
+	}
+	if len(target) > 0 {
+		data["target"] = target
+	}
+	a.publishMapEvent(ctx, mapEvent{Type: "check.start", Data: data})
 }
 
 func (a *App) publishMapResult(ctx context.Context, checkID, siteID uuid.UUID, reqIP string, ag *agentAuth,
-	kind string, spec []byte, status string, payload json.RawMessage, metrics []byte) {
+	kind string, spec []byte, status string, payload json.RawMessage, metrics []byte, reason string) {
 
 	targetHost, _ := extractTargetFromSpec(kind, spec)
 	targetIP := findTargetIP(kind, payload, metrics)
@@ -1053,24 +1235,94 @@ func (a *App) publishMapResult(ctx context.Context, checkID, siteID uuid.UUID, r
 		}
 	}
 
-	ev := mapEvent{
-		Type: "check.result",
-		Data: map[string]any{
-			"check_id": checkID, "site_id": siteID, "kind": kind, "status": status,
-			"source": map[string]any{"ip": reqIP, "geo": geoJSON(a, reqIP)},
-			"agent":  map[string]any{"id": ag.ID, "ip": ag.IP.String(), "geo": geoJSON(a, ag.IP.String())},
-			"target": map[string]any{"host": targetHost, "ip": targetIP, "geo": geoJSON(a, targetIP)},
-			"trace":  trace,
-		},
+	data := map[string]any{
+		"check_id": checkID,
+		"kind":     kind,
+		"status":   status,
 	}
-	a.publishMapEvent(ctx, ev)
+	if siteID != uuid.Nil {
+		data["site_id"] = siteID
+	}
+	source := map[string]any{}
+	if strings.TrimSpace(reqIP) != "" {
+		source["ip"] = reqIP
+		if geo := geoJSON(a, reqIP); geo != nil {
+			source["geo"] = geo
+		}
+	}
+	if len(source) > 0 {
+		data["source"] = source
+	}
+	target := map[string]any{}
+	if targetHost != "" {
+		target["host"] = targetHost
+		if looksIP(targetHost) {
+			target["ip"] = targetHost
+			if geo := geoJSON(a, targetHost); geo != nil {
+				target["geo"] = geo
+			}
+		}
+	}
+	if targetIP != "" {
+		target["ip"] = targetIP
+		if geo := geoJSON(a, targetIP); geo != nil {
+			target["geo"] = geo
+		}
+	}
+	if len(target) > 0 {
+		data["target"] = target
+	}
+	if len(trace) > 0 {
+		data["trace"] = trace
+	}
+	if strings.TrimSpace(reason) != "" {
+		data["reason"] = reason
+	}
+	if ag != nil {
+		agent := map[string]any{
+			"id":          ag.ID,
+			"external_id": ag.ExternalID,
+			"name":        ag.Name,
+		}
+		if aip := ipString(ag.IP); aip != "" {
+			agent["ip"] = aip
+			if geo := geoJSON(a, aip); geo != nil {
+				agent["geo"] = geo
+			}
+		}
+		data["agent"] = agent
+	}
+	a.publishMapEvent(ctx, mapEvent{Type: "check.result", Data: data})
 }
 
 func (a *App) publishMapDone(ctx context.Context, checkID uuid.UUID) {
-	a.publishMapEvent(ctx, mapEvent{
-		Type: "check.done",
-		Data: map[string]any{"check_id": checkID},
-	})
+	data := map[string]any{
+		"check_id": checkID,
+		"status":   "done",
+	}
+	if a.pool != nil {
+		var siteID uuid.UUID
+		var reqIP sql.NullString
+		var checkStatus sql.NullString
+		if err := a.pool.QueryRow(ctx,
+			`select site_id, request_ip::text, status from checks where id=$1`, checkID).
+			Scan(&siteID, &reqIP, &checkStatus); err == nil {
+			if siteID != uuid.Nil {
+				data["site_id"] = siteID
+			}
+			if strings.TrimSpace(checkStatus.String) != "" {
+				data["status"] = checkStatus.String
+			}
+			if reqIP.String != "" {
+				source := map[string]any{"ip": reqIP.String}
+				if geo := geoJSON(a, reqIP.String); geo != nil {
+					source["geo"] = geo
+				}
+				data["source"] = source
+			}
+		}
+	}
+	a.publishMapEvent(ctx, mapEvent{Type: "check.done", Data: data})
 }
 
 func geoJSON(a *App, ip string) any {
@@ -1195,13 +1447,53 @@ func looksIP(s string) bool {
 	return net.ParseIP(strings.TrimSpace(s)) != nil
 }
 
+func ipString(ip net.IP) string {
+	if ip == nil {
+		return ""
+	}
+	return ip.String()
+}
+
+const (
+	defaultMapAgentsMinutes   = 10
+	maxMapAgentsMinutes       = 60
+	defaultMapAgentsLimit     = 200
+	maxMapAgentsLimit         = 500
+	defaultMapSnapshotMinutes = 60
+	maxMapSnapshotMinutes     = 1440
+	defaultMapSnapshotLimit   = 1000
+	maxMapSnapshotLimit       = 2000
+	agentOnlineEventTTL       = 30 * time.Second
+)
+
+func clampIntParam(raw string, def, min, max int) int {
+	val := def
+	if v, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil && v > 0 {
+		val = v
+	}
+	if val < min {
+		val = min
+	}
+	if max > 0 && val > max {
+		val = max
+	}
+	return val
+}
+
 /*************** Endpoints: Map ***************/
 func (a *App) handleMapAgents(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	q := r.URL.Query()
+	minutes := clampIntParam(q.Get("minutes"), defaultMapAgentsMinutes, 1, maxMapAgentsMinutes)
+	limit := clampIntParam(q.Get("limit"), defaultMapAgentsLimit, 1, maxMapAgentsLimit)
+
 	rows, err := a.pool.Query(r.Context(),
 		`select id, name, version, last_seen, max_parallel, agent_ip::text, coalesce(location,'')
-		   from agents
-		  where last_seen > now() - interval '10 minutes'
-		  order by last_seen desc`)
+                   from agents
+                  where last_seen > now() - ($1::int * interval '1 minute')
+                  order by last_seen desc
+                  limit $2`, minutes, limit)
 	if err != nil {
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
@@ -1233,7 +1525,7 @@ func (a *App) handleMapAgents(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"items": items})
 }
 
-func (a *App) handleMapStream(w http.ResponseWriter, r *http.Request) {
+func (a *App) streamMapEvents(w http.ResponseWriter, r *http.Request) {
 	// SSE
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -1244,6 +1536,8 @@ func (a *App) handleMapStream(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "stream unsupported", http.StatusInternalServerError)
 		return
 	}
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
 	ctx := r.Context()
 	pubsub := a.redis.Subscribe(ctx, a.cfg.MapPubChannel)
 	defer pubsub.Close()
@@ -1270,20 +1564,29 @@ func (a *App) handleMapStream(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (a *App) handleMapStream(w http.ResponseWriter, r *http.Request) {
+	a.streamMapEvents(w, r)
+}
+
+func (a *App) handleMapEvents(w http.ResponseWriter, r *http.Request) {
+	token := strings.TrimSpace(r.URL.Query().Get("access_token"))
+	if token != "" && strings.TrimSpace(r.Header.Get("Authorization")) == "" {
+		clone := r.Clone(r.Context())
+		clone.Header = clone.Header.Clone()
+		clone.Header.Set("Authorization", "Bearer "+token)
+		q := clone.URL.Query()
+		q.Del("access_token")
+		clone.URL.RawQuery = q.Encode()
+		r = clone
+	}
+	a.streamMapEvents(w, r)
+}
+
 func (a *App) handleMapSnapshot(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
 	q := r.URL.Query()
-	minutes := 60
-	if s := q.Get("minutes"); s != "" {
-		if v, err := strconv.Atoi(s); err == nil && v > 0 {
-			minutes = v
-		}
-	}
-	limit := 1000
-	if s := q.Get("limit"); s != "" {
-		if v, err := strconv.Atoi(s); err == nil && v > 0 {
-			limit = v
-		}
-	}
+	minutes := clampIntParam(q.Get("minutes"), defaultMapSnapshotMinutes, 1, maxMapSnapshotMinutes)
+	limit := clampIntParam(q.Get("limit"), defaultMapSnapshotLimit, 1, maxMapSnapshotLimit)
 	cursor := q.Get("cursor")
 
 	var startID string
@@ -1314,6 +1617,7 @@ func (a *App) handleMapSnapshot(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleCheckGeo(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
 	idStr := chi.URLParam(r, "id")
 	cid, err := uuid.Parse(idStr)
 	if err != nil {
@@ -1392,6 +1696,7 @@ func (a *App) handleCheckGeo(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleGeoLookup(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
 	ip := strings.TrimSpace(r.URL.Query().Get("ip"))
 	if ip == "" {
 		http.Error(w, "ip required", http.StatusBadRequest)

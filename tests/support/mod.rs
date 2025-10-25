@@ -20,13 +20,11 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use codecrafters_dns_server::concurrency::{
-    ConcurrencyController, ConcurrencyLimits, ConcurrencyPermit,
-};
-use codecrafters_dns_server::control_plane::{
+use dns_agent::concurrency::{ConcurrencyController, ConcurrencyLimits, ConcurrencyPermit};
+use dns_agent::control_plane::{
     ExtendOutcome as AgentExtendOutcome, LeaseReport, Observation, TaskKind, TaskSpec,
 };
-use codecrafters_dns_server::lease_extender::{
+use dns_agent::lease_extender::{
     spawn_lease_extender, LeaseExtendClient, LeaseExtendUpdate, LeaseExtenderClient,
     LeaseExtenderConfig, LeaseExtenderHandle,
 };
@@ -91,18 +89,18 @@ fn default_spec(id: u64, kind: TaskType) -> TaskSpec {
             url: format!("https://example.com/{id}"),
             method: Some("GET".into()),
         },
-        TaskType::Tcp => TaskSpec::Tcp(codecrafters_dns_server::control_plane::TcpSpec {
+        TaskType::Tcp => TaskSpec::Tcp(dns_agent::control_plane::TcpSpec {
             host: "127.0.0.1".into(),
             port: 80,
         }),
-        TaskType::Ping => TaskSpec::Ping(codecrafters_dns_server::control_plane::PingSpec {
+        TaskType::Ping => TaskSpec::Ping(dns_agent::control_plane::PingSpec {
             host: "127.0.0.1".into(),
             count: Some(4),
             interval_ms: None,
             timeout_ms: None,
             rate_limit_per_sec: None,
         }),
-        TaskType::Trace => TaskSpec::Trace(codecrafters_dns_server::control_plane::TraceSpec {
+        TaskType::Trace => TaskSpec::Trace(dns_agent::control_plane::TraceSpec {
             host: "127.0.0.1".into(),
             max_hops: Some(6),
         }),
@@ -706,13 +704,13 @@ struct WorkerCommand {
     extender: LeaseExtenderClient,
 }
 
-fn to_control_plane_lease(lease: &LeasedTask) -> codecrafters_dns_server::control_plane::Lease {
+fn to_control_plane_lease(lease: &LeasedTask) -> dns_agent::control_plane::Lease {
     let remaining = lease
         .lease_until
         .checked_duration_since(Instant::now())
         .unwrap_or_default()
         .as_millis() as u64;
-    codecrafters_dns_server::control_plane::Lease {
+    dns_agent::control_plane::Lease {
         lease_id: lease.lease_id,
         task_id: lease.task.id,
         kind: lease.task.kind.into(),

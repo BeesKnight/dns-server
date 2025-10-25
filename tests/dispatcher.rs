@@ -1,11 +1,7 @@
 use std::time::Duration;
 
-use codecrafters_dns_server::control_plane::{
-    Lease, PingSpec, TaskKind, TaskSpec, TcpSpec, TraceSpec,
-};
-use codecrafters_dns_server::dispatcher::{
-    spawn_dispatcher, DispatchQueues, DispatcherConfig, LeaseAssignment,
-};
+use dns_agent::control_plane::{Lease, PingSpec, TaskKind, TaskSpec, TcpSpec, TraceSpec};
+use dns_agent::dispatcher::{spawn_dispatcher, DispatchQueues, DispatcherConfig, LeaseAssignment};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 

@@ -1,7 +1,7 @@
 use std::{collections::HashMap, env, net::SocketAddr, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
-use codecrafters_dns_server::{
+use dns_agent::{
     control_plane::{ControlPlaneClient, HttpControlPlaneTransport, RegisterRequest, TaskKind},
     BytePacketBuf,
 };
@@ -190,7 +190,7 @@ async fn handle_request(
 
 async fn run_control_plane<T>(client: ControlPlaneClient<T>, batch_tx: mpsc::Sender<Vec<u64>>)
 where
-    T: codecrafters_dns_server::control_plane::ControlPlaneTransport + 'static,
+    T: dns_agent::control_plane::ControlPlaneTransport + 'static,
 {
     if let Err(err) = client
         .register(RegisterRequest {

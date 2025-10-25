@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use codecrafters_dns_server::control_plane::{
+use dns_agent::control_plane::{
     ClaimRequest, ClaimResponse, ControlPlaneClient, ControlPlaneError, ControlPlaneTransport,
     ExtendOutcome, ExtendRequest, HeartbeatRequest, HeartbeatResponse, LeaseReport,
     RegisterRequest, RegisterResponse, ReportRequest, ReportResponse, TaskKind, TaskSpec,
@@ -86,7 +86,7 @@ impl ControlPlaneTransport for MockBackendTransport {
         let leases = claim
             .leases
             .into_iter()
-            .map(|lease| codecrafters_dns_server::control_plane::Lease {
+            .map(|lease| dns_agent::control_plane::Lease {
                 lease_id: lease.lease_id,
                 task_id: lease.task.id,
                 kind: from_task_type(lease.task.kind),

@@ -13,11 +13,11 @@ use async_trait::async_trait;
 use tokio::sync::{Mutex, Notify, Semaphore};
 use tokio::time::Instant;
 
-use codecrafters_dns_server::control_plane::{
+use dns_agent::control_plane::{
     Lease, LeaseReport, Observation, PingSpec, TaskKind, TaskSpec, TcpSpec, TraceSpec,
 };
-use codecrafters_dns_server::dispatcher::{spawn_dispatcher, DispatcherConfig, LeaseAssignment};
-use codecrafters_dns_server::workers::{
+use dns_agent::dispatcher::{spawn_dispatcher, DispatcherConfig, LeaseAssignment};
+use dns_agent::workers::{
     spawn_worker_pools, PingEngine, PingProbeOutcome, PingProtocol, PingRequest, PingWorker,
     ReportSink, TcpWorker, WorkerHandler, WorkerHandlers, WorkerPoolsConfig, WorkerReport,
 };

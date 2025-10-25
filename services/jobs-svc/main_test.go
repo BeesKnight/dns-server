@@ -126,6 +126,315 @@ func TestObservationsPayloadNormalizes(t *testing.T) {
 	}
 }
 
+func TestHandleQuickCheckCreateQueuesTasks(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("start miniredis: %v", err)
+	}
+	defer mr.Close()
+
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr(), Protocol: 2})
+	defer rdb.Close()
+
+	checkID := uuid.New()
+	fp := &fakePool{}
+	fp.queryRowFn = func(_ context.Context, sql string, args ...any) pgx.Row {
+		if !strings.Contains(sql, "insert into checks") {
+			return fakeRow{err: fmt.Errorf("unexpected query: %s", sql)}
+		}
+		return fakeRow{values: []any{checkID}}
+	}
+	var quickInserted bool
+	fp.execFn = func(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+		switch {
+		case strings.Contains(sql, "insert into quick_checks"):
+			quickInserted = true
+			return pgconn.NewCommandTag("INSERT 1"), nil
+		case strings.Contains(sql, "update checks set started_at"):
+			return pgconn.NewCommandTag("UPDATE 1"), nil
+		case strings.Contains(sql, "update checks set finished_at"):
+			return pgconn.NewCommandTag("UPDATE 1"), nil
+		default:
+			return pgconn.NewCommandTag(""), fmt.Errorf("unexpected exec: %s", sql)
+		}
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	app := &App{
+		cfg: Config{
+			StreamTasks:      "check_tasks",
+			PubPrefix:        "check-upd:",
+			CacheTTL:         30 * time.Second,
+			QuickDedupTTL:    30 * time.Second,
+			QuickRateWindow:  time.Minute,
+			QuickRatePerUser: 10,
+			QuickRatePerIP:   10,
+		},
+		log:   logger,
+		pool:  fp,
+		redis: rdb,
+	}
+
+	ctx := context.Background()
+	pubsub := rdb.Subscribe(ctx, app.cfg.PubPrefix+checkID.String())
+	defer pubsub.Close()
+	if _, err := pubsub.ReceiveTimeout(ctx, time.Second); err != nil {
+		t.Fatalf("subscribe ack: %v", err)
+	}
+	msgCh := pubsub.Channel()
+
+	body := strings.NewReader(`{"url":"https://example.com"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/jobs/checks", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-User-Id", uuid.New().String())
+	req.Header.Set("X-Forwarded-For", "203.0.113.10")
+
+	w := httptest.NewRecorder()
+	app.handleQuickCheckCreate(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d: %s", w.Code, w.Body.String())
+	}
+	var resp quickCheckResp
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal resp: %v", err)
+	}
+	if resp.CheckID != checkID {
+		t.Fatalf("unexpected check id %s", resp.CheckID)
+	}
+	if len(resp.Queued) != 1 || resp.Queued[0] != "http" {
+		t.Fatalf("expected http queued, got %#v", resp.Queued)
+	}
+	if !quickInserted {
+		t.Fatalf("expected quick_checks insert")
+	}
+
+	msgs, err := rdb.XRange(ctx, app.cfg.StreamTasks, "-", "+").Result()
+	if err != nil {
+		t.Fatalf("xrange: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 queued task, got %d", len(msgs))
+	}
+	if msgs[0].Values["check_id"].(string) != checkID.String() {
+		t.Fatalf("unexpected check_id in stream: %#v", msgs[0].Values)
+	}
+
+	select {
+	case payload := <-msgCh:
+		var envelope map[string]any
+		if err := json.Unmarshal([]byte(payload.Payload), &envelope); err != nil {
+			t.Fatalf("unmarshal envelope: %v", err)
+		}
+		if envelope["type"] != "check.start" {
+			t.Fatalf("expected check.start event, got %#v", envelope["type"])
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("expected check.start event")
+	}
+}
+
+func TestHandleQuickCheckCreateRateLimit(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("start miniredis: %v", err)
+	}
+	defer mr.Close()
+
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr(), Protocol: 2})
+	defer rdb.Close()
+
+	checkID := uuid.New()
+	fp := &fakePool{}
+	var insertCount int
+	fp.queryRowFn = func(_ context.Context, sql string, args ...any) pgx.Row {
+		if !strings.Contains(sql, "insert into checks") {
+			return fakeRow{err: fmt.Errorf("unexpected query: %s", sql)}
+		}
+		insertCount++
+		return fakeRow{values: []any{checkID}}
+	}
+	fp.execFn = func(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+		switch {
+		case strings.Contains(sql, "insert into quick_checks"):
+			return pgconn.NewCommandTag("INSERT 1"), nil
+		case strings.Contains(sql, "update checks set started_at"):
+			return pgconn.NewCommandTag("UPDATE 1"), nil
+		case strings.Contains(sql, "update checks set finished_at"):
+			return pgconn.NewCommandTag("UPDATE 1"), nil
+		default:
+			return pgconn.NewCommandTag(""), nil
+		}
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	app := &App{
+		cfg: Config{
+			StreamTasks:      "check_tasks",
+			PubPrefix:        "check-upd:",
+			CacheTTL:         30 * time.Second,
+			QuickDedupTTL:    10 * time.Second,
+			QuickRateWindow:  time.Minute,
+			QuickRatePerUser: 1,
+			QuickRatePerIP:   5,
+		},
+		log:   logger,
+		pool:  fp,
+		redis: rdb,
+	}
+
+	body := strings.NewReader(`{"url":"https://example.org"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/jobs/checks", body)
+	userID := uuid.New().String()
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-User-Id", userID)
+	req.Header.Set("X-Real-IP", "198.51.100.7")
+
+	w := httptest.NewRecorder()
+	app.handleQuickCheckCreate(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("first request unexpected status %d", w.Code)
+	}
+
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/jobs/checks", strings.NewReader(`{"url":"https://example.org"}`))
+	req2.Header.Set("Content-Type", "application/json")
+	req2.Header.Set("X-User-Id", userID)
+	req2.Header.Set("X-Real-IP", "198.51.100.7")
+	w2 := httptest.NewRecorder()
+	app.handleQuickCheckCreate(w2, req2)
+	if w2.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected rate limit 429, got %d", w2.Code)
+	}
+	if insertCount != 1 {
+		t.Fatalf("expected single insert, got %d", insertCount)
+	}
+}
+
+func TestHandleQuickCheckCreateEmitsCachedResults(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("start miniredis: %v", err)
+	}
+	defer mr.Close()
+
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr(), Protocol: 2})
+	defer rdb.Close()
+
+	checkID := uuid.New()
+	fp := &fakePool{}
+	fp.queryRowFn = func(_ context.Context, sql string, args ...any) pgx.Row {
+		switch {
+		case strings.Contains(sql, "insert into checks"):
+			return fakeRow{values: []any{checkID}}
+		default:
+			return fakeRow{err: fmt.Errorf("unexpected query: %s", sql)}
+		}
+	}
+	var quickInserted bool
+	var resultsInserted int
+	fp.execFn = func(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+		switch {
+		case strings.Contains(sql, "insert into quick_checks"):
+			quickInserted = true
+			return pgconn.NewCommandTag("INSERT 1"), nil
+		case strings.Contains(sql, "insert into check_results"):
+			resultsInserted++
+			return pgconn.NewCommandTag("INSERT 1"), nil
+		case strings.Contains(sql, "update checks set started_at"):
+			return pgconn.NewCommandTag("UPDATE 1"), nil
+		case strings.Contains(sql, "update checks set finished_at"):
+			return pgconn.NewCommandTag("UPDATE 1"), nil
+		default:
+			return pgconn.NewCommandTag(""), fmt.Errorf("unexpected exec: %s", sql)
+		}
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	app := &App{
+		cfg: Config{
+			StreamTasks:      "check_tasks",
+			PubPrefix:        "check-upd:",
+			CacheTTL:         time.Minute,
+			QuickDedupTTL:    time.Minute,
+			QuickRateWindow:  time.Minute,
+			QuickRatePerUser: 5,
+			QuickRatePerIP:   5,
+		},
+		log:   logger,
+		pool:  fp,
+		redis: rdb,
+	}
+
+	seed := strings.ToLower("https://cached.example") + "|quick|http"
+	prefix := "quick:" + sha256Hex(seed)
+	cacheKey := fmt.Sprintf("recent:%s:%s", prefix, "http")
+	cachedVal := quickCachedValue{Status: "ok", Payload: json.RawMessage(`{"latency":10}`), Metrics: json.RawMessage(`{"age":5}`), TS: time.Now().UTC().Format(time.RFC3339Nano)}
+	rawCache, _ := json.Marshal(cachedVal)
+	if err := rdb.Set(context.Background(), cacheKey, string(rawCache), 0).Err(); err != nil {
+		t.Fatalf("seed cache: %v", err)
+	}
+
+	ctx := context.Background()
+	pubsub := rdb.Subscribe(ctx, app.cfg.PubPrefix+checkID.String())
+	defer pubsub.Close()
+	if _, err := pubsub.ReceiveTimeout(ctx, time.Second); err != nil {
+		t.Fatalf("subscribe ack: %v", err)
+	}
+	msgCh := pubsub.Channel()
+
+	body := strings.NewReader(`{"url":"https://cached.example"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/jobs/checks", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Forwarded-For", "192.0.2.44")
+
+	w := httptest.NewRecorder()
+	app.handleQuickCheckCreate(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d: %s", w.Code, w.Body.String())
+	}
+	var resp quickCheckResp
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal resp: %v", err)
+	}
+	if len(resp.Cached) != 1 || resp.Cached[0] != "http" {
+		t.Fatalf("expected cached http, got %#v", resp.Cached)
+	}
+	if len(resp.Queued) != 0 {
+		t.Fatalf("expected no queued kinds, got %#v", resp.Queued)
+	}
+	if !quickInserted {
+		t.Fatalf("expected quick_checks insert")
+	}
+	if resultsInserted != 1 {
+		t.Fatalf("expected cached result inserted, got %d", resultsInserted)
+	}
+
+	receivedResult := false
+	for i := 0; i < 5; i++ {
+		select {
+		case payload := <-msgCh:
+			var envelope map[string]any
+			if err := json.Unmarshal([]byte(payload.Payload), &envelope); err != nil {
+				continue
+			}
+			if envelope["type"] == "result" {
+				data, _ := envelope["data"].(map[string]any)
+				if data != nil && data["source"] == "cache" {
+					receivedResult = true
+					i = 5
+					break
+				}
+			}
+		case <-time.After(2 * time.Second):
+			i = 5
+		}
+	}
+	if !receivedResult {
+		t.Fatalf("expected cached result event")
+	}
+}
+
 func TestHandleExtendExtendsLeaseDeadline(t *testing.T) {
 	mr, err := miniredis.Run()
 	if err != nil {

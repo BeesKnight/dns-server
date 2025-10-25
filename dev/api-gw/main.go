@@ -180,6 +180,7 @@ func main() {
 		// === Основные ресурсы checks/sites → sites-svc ===
 		pr.Mount("/v1/sites", app.proxyMount(app.sitesRP))
 		pr.Mount("/v1/checks", app.proxyMount(app.sitesRP))
+		pr.Handle("/v1/jobs/checks", app.proxyHandler(app.jobsRP))
 	})
 
 	srv := &http.Server{Addr: cfg.HTTPAddr, Handler: r, ReadHeaderTimeout: 5 * time.Second}

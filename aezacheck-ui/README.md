@@ -1,90 +1,90 @@
 # AezaCheck UI
 
-This package contains the frontend shell for the AezaCheck operator console. It
-is implemented with React + TypeScript (Vite) and renders live telemetry from
-the jobs control plane.
+Этот пакет содержит фронтенд-оболочку операторской консоли AezaCheck. Приложение
+написано на React + TypeScript (Vite) и отображает телеметрию в реальном времени
+из control plane заданий.
 
-## Map telemetry stream
+## Поток телеметрии карты
 
-The map view subscribes to the jobs service Server-Sent Events (SSE) endpoint
-`/v1/map/events`. When creating an `EventSource`, append the `access_token`
-query parameter – browsers omit `Authorization` headers for EventSource
-connections. Example:
+Экран карты подписывается на SSE-эндпоинт jobs-сервиса `/v1/map/events`.
+Создавая `EventSource`, добавьте параметр `access_token` в query — браузеры не
+передают заголовки `Authorization` для SSE-подключений. Пример:
 
 ```ts
 const source = new EventSource(`${apiBase}/v1/map/events?access_token=${token}`);
 ```
 
-The stream sends keepalive comments every 15 seconds. Individual events are
-JSON payloads with these types:
+Поток отправляет keepalive-комментарии каждые 15 секунд. Отдельные события — это
+JSON-пакеты со следующими типами:
 
-| Type           | Description                                                                  |
-| -------------- | ---------------------------------------------------------------------------- |
-| `agent.online` | Agent heartbeat/registration. `data.agent` contains `id`, `ip`, `geo`.       |
-| `check.start`  | A check has been leased. `data.source/target.geo` contain the geolocation.   |
-| `check.result` | Intermediate result with status (`ok`, `error`, `cancelled`, etc.).          |
-| `check.done`   | Final completion marker. Includes `status` and the originating source geo.   |
+| Тип             | Описание                                                                      |
+| ----------------| ------------------------------------------------------------------------------ |
+| `agent.online`  | Хартбит/регистрация агента. `data.agent` содержит `id`, `ip`, `geo`.           |
+| `check.start`   | Выдан новый чек. `data.source/target.geo` содержат геолокацию.                 |
+| `check.result`  | Промежуточный результат со статусом (`ok`, `error`, `cancelled` и т.д.).       |
+| `check.done`    | Финальное завершение. Включает `status` и исходную геолокацию источника.       |
 
-The SLA for the UI is sub-second delivery from publish to UI receipt and a
-maximum keepalive interval of 15 seconds.
+SLA для UI — доставка события менее секунды от публикации и keepalive не реже
+чем раз в 15 секунд.
 
-## Local development
+## Локальная разработка
 
-Install dependencies and run the dev server:
+Установите зависимости и запустите dev-сервер:
 
 ```bash
 npm install
 npm run dev
 ```
 
-### Runtime configuration
+### Конфигурация рантайма
 
-The frontend reads the following environment variables (all prefixed with
-`VITE_`). Create a `.env.local` file or export them in your shell:
+Фронтенд читает следующие переменные окружения (все с префиксом `VITE_`). Создайте
+`.env.local` или экспортируйте значения в shell:
 
-| Variable | Description | Default |
+| Переменная | Описание | Значение по умолчанию |
 | --- | --- | --- |
-| `VITE_API_BASE` | Base URL for API requests in production builds. | `/v1` |
-| `VITE_API_PROXY_TARGET` | Target URL for the dev server proxy (`/api/*`). When set, the dev server forwards API calls to this host. | `http://localhost:8088` |
-| `VITE_USE_PROXY` | Force-enable the `/api` proxy even without `VITE_API_PROXY_TARGET`. Set to `true` when the backend lives on a different origin. | `false` |
-| `VITE_API_TIMEOUT` | Request timeout in milliseconds for the typed API client. | `15000` |
-| `VITE_API_RETRY_LIMIT` | Number of automatic retries for idempotent requests. | `2` |
-| `VITE_DEV_PORT` | Port for `npm run dev`. | `5173` |
+| `VITE_API_BASE` | Базовый URL для API-запросов в production-сборке. | `/v1` |
+| `VITE_API_PROXY_TARGET` | Целевой адрес для dev-прокси (`/api/*`). При установке dev-сервер пробрасывает запросы к бэкенду. | `http://localhost:8088` |
+| `VITE_USE_PROXY` | Принудительное включение прокси `/api` даже без `VITE_API_PROXY_TARGET`. Установите `true`, если бэкенд на другом origin. | `false` |
+| `VITE_API_TIMEOUT` | Таймаут запросов (мс) для типизированного API-клиента. | `15000` |
+| `VITE_API_RETRY_LIMIT` | Количество автоматических ретраев для идемпотентных запросов. | `2` |
+| `VITE_DEV_PORT` | Порт для `npm run dev`. | `5173` |
 
-In development the UI automatically calls `/api/*`; configure the proxy target to
-forward requests to your backend, or set `VITE_API_BASE` to a full URL to bypass
-the proxy.
+В режиме разработки UI обращается к `/api/*`; настройте прокси-цель, чтобы
+пробрасывать запросы к вашему backend, или задайте `VITE_API_BASE` полным URL,
+чтобы обойти прокси.
 
-### Agent operations console
+### Консоль управления агентами
 
-The `/app/agents` route exposes the agent operations dashboard:
+Маршрут `/app/agents` открывает операционную панель агента:
 
-- Virtualised list for large agent inventories with search, status filtering and
-  optimistic status changes.
-- Task status board with aggregated progress per state.
-- Scrollable interaction history with incremental pagination.
-- Request cancellation buttons and error notifications for observability.
+- Виртуализованный список для большого числа агентов с поиском, фильтрацией по
+  статусу и оптимистичными обновлениями.
+- Доска статусов задач с агрегированным прогрессом по состояниям.
+- Прокручиваемая история взаимодействий с постраничной догрузкой.
+- Кнопки отмены запросов и уведомления об ошибках для наблюдаемости.
 
-### Testing
+### Тестирование
 
-Unit tests use [Vitest](https://vitest.dev):
+Юнит-тесты запускаются через [Vitest](https://vitest.dev):
 
 ```bash
 npm run test
 ```
 
-End-to-end smoke tests use [Playwright](https://playwright.dev). They start a dev
-server automatically and stub backend responses:
+End-to-end смоук-тесты используют [Playwright](https://playwright.dev). Они
+поднимают dev-сервер автоматически и подменяют ответы backend-а:
 
 ```bash
 npm run test:e2e
 ```
 
-### Manual verification
+### Ручная проверка
 
-1. `npm run dev` and open `http://localhost:5173/app/agents`.
-2. Inspect that the agent list paginates and virtualises while filtering works.
-3. Trigger a status change from the dropdown and confirm the UI updates
-   optimistically.
-4. Click “Загрузить ещё” in the history panel and verify new items append
-   without losing previous entries.
+1. Выполните `npm run dev` и откройте `http://localhost:5173/app/agents`.
+2. Убедитесь, что список агентов постранично подгружает и виртуализует записи,
+   пока фильтры продолжают работать.
+3. Измените статус через выпадающий список и проверьте, что UI обновляется
+   оптимистично.
+4. Нажмите «Загрузить ещё» в панели истории и убедитесь, что записи добавляются
+   без потери предыдущих.

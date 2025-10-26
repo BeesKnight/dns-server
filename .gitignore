@@ -308,3 +308,8 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+# Allow committing Rust binaries in src/bin
+!src/bin/
+!src/bin/**
+
+dev/dns-agent/secrets.env

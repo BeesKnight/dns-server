@@ -3,7 +3,7 @@ name = "dns_agent"
 version = "0.1.0"
 authors = ["Codecrafters <hello@codecrafters.io>"]
 edition = "2021"
-rust-version = "1.80"
+rust-version = "1.82"
 
 [dependencies]
 anyhow = "1.0.68"                                # error handling
@@ -17,11 +17,13 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "1.0.38"                             # error handling
-tokio = { version = "1.38", features = ["io-util", "macros", "net", "rt-multi-thread", "time", "sync", "test-util"] }
+tokio = { version = "1.38", features = ["io-util", "macros", "net", "rt-multi-thread", "time", "sync", "test-util", "signal"] }
 tokio-util = "0.7"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 hostname = "0.3"
+home = "0.5.5"
+base64ct = "1.7.1"
 metrics = "0.23"
 socket2 = { version = "0.5", features = ["all"] }
 rand = "0.8"
@@ -49,3 +51,4 @@ pnet_packet = "0.34"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.54", features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper"] }
+

@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import AuthPage from "./pages/Auth";
 import Home from "./pages/Home";
 import Services from "./pages/Services"; // <- добавили
+import Agents from "./pages/Agents";
 import { useAuth } from "./store/auth";
 
 /** Защищённый маршрут: ждём bootstrap(), потом пускаем только если user есть */
@@ -50,6 +51,14 @@ export default function App() {
           element={
             <Protected>
               <Services />
+            </Protected>
+          }
+        />
+        <Route
+          path="/app/agents"
+          element={
+            <Protected>
+              <Agents />
             </Protected>
           }
         />

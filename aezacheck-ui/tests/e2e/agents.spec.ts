@@ -13,7 +13,7 @@ test.beforeEach(async ({ page }) => {
     });
   });
 
-  await page.route("**/api/agents?**", async (route) => {
+  await page.route("**/api/v1/agents?**", async (route) => {
     const url = new URL(route.request().url());
     const pageParam = Number(url.searchParams.get("page") ?? "1");
     const response = {
@@ -40,7 +40,7 @@ test.beforeEach(async ({ page }) => {
     });
   });
 
-  await page.route("**/api/agents/agent-1/tasks**", async (route) => {
+  await page.route("**/api/v1/agents/agent-1/tasks**", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -62,7 +62,7 @@ test.beforeEach(async ({ page }) => {
     });
   });
 
-  await page.route("**/api/tasks**", async (route) => {
+  await page.route("**/api/v1/tasks**", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -84,7 +84,7 @@ test.beforeEach(async ({ page }) => {
     });
   });
 
-  await page.route("**/api/interactions**", async (route) => {
+  await page.route("**/api/v1/interactions**", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",

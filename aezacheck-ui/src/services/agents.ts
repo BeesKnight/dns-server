@@ -28,18 +28,18 @@ export const agentService = {
       page: params.page ?? 1,
       pageSize: params.pageSize ?? 50,
     });
-    return request<PagedResult<Agent>>(`agents?${search.toString()}`, {
+    return request<PagedResult<Agent>>(`v1/agents?${search.toString()}`, {
       ...options,
       method: "get",
     });
   },
 
   get(id: string, options?: HttpRequestOptions): HttpRequest<Agent> {
-    return request<Agent>(`agents/${id}`, { ...options, method: "get" });
+    return request<Agent>(`v1/agents/${id}`, { ...options, method: "get" });
   },
 
   create(payload: AgentPayload, options?: HttpRequestOptions): HttpRequest<Agent> {
-    return request<Agent>("agents", {
+    return request<Agent>("v1/agents", {
       ...options,
       method: "post",
       json: payload,
@@ -47,7 +47,7 @@ export const agentService = {
   },
 
   update(id: string, patch: AgentPatch, options?: HttpRequestOptions): HttpRequest<Agent> {
-    return request<Agent>(`agents/${id}`, {
+    return request<Agent>(`v1/agents/${id}`, {
       ...options,
       method: "patch",
       json: patch,
@@ -55,7 +55,7 @@ export const agentService = {
   },
 
   remove(id: string, options?: HttpRequestOptions): HttpRequest<{ id: string }> {
-    return request<{ id: string }>(`agents/${id}`, {
+    return request<{ id: string }>(`v1/agents/${id}`, {
       ...options,
       method: "delete",
     });
@@ -71,7 +71,7 @@ export const agentService = {
       pageSize: params.pageSize ?? 20,
       status: params.status,
     });
-    return request<PagedResult<TaskSummary>>(`agents/${id}/tasks?${search.toString()}`, {
+    return request<PagedResult<TaskSummary>>(`v1/agents/${id}/tasks?${search.toString()}`, {
       ...options,
       method: "get",
     });

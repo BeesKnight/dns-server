@@ -1,4 +1,7 @@
 // src/lib/api.ts
+import { request } from "../services";
+import type { CheckGeoResponse, GeoPoint } from "../types/checks";
+
 export type User = {
   id: string;
   email: string;
@@ -7,14 +10,7 @@ export type User = {
   current_ip?: string | null;
 };
 
-export type GeoInfo = {
-  lat: number | null;
-  lon: number | null;
-  city: string | null;
-  country: string | null;
-  asn: number | null;
-  asn_org: string | null;
-};
+export type GeoInfo = GeoPoint;
 
 export type ServiceSummary = {
   id: string;
@@ -77,8 +73,6 @@ type RawServiceReviewCreate = {
 };
 
 const API_BASE = import.meta.env.VITE_API_BASE?.replace(/\/?$/, "") ?? (import.meta.env.DEV ? "/api" : "/v1");
-
-import { request } from "../services";
 
 type CallInit = Omit<RequestInit, "body"> & {
   method?: string;
@@ -201,4 +195,7 @@ export const api = {
       method: "POST",
       body: { url, kinds, ...opts },
     }),
+
+  getCheckGeo: (checkId: string) =>
+    call<CheckGeoResponse>(`v1/checks/${encodeURIComponent(checkId)}/geo`),
 };

@@ -221,60 +221,68 @@ export default function MapGlobe({ userLocation }: MapGlobeProps) {
           background: MAP_BACKGROUND,
         }}
       >
-        <Globe
-          ref={globeRef}
-          backgroundColor={"rgba(0, 0, 0, 0)"}
-          globeMaterial={globeMaterial}
-          style={{ width: "100%", height: "100%" }}
-
-          /* атмосфера и фон */
-          showAtmosphere
-          atmosphereColor={SEA_GLOW}
-          atmosphereAltitude={0.25}
-
-          /* материки */
-          polygonsData={polygons}
-          polygonAltitude={0.02}
-          polygonCapColor={() => LAND_CAP}
-          polygonSideColor={() => LAND_SIDE}
-          polygonStrokeColor={() => LAND_STROKE}
-          polygonsTransitionDuration={0}
-
-          polygonLabel={(feat) => {
-            const props = (feat as CountryFeature).properties || {};
-            return (
-              (props.name as string) ||
-              (props.ADMIN as string) ||
-              (props.name_long as string) ||
-              ""
-            );
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            width: "100%",
+            height: "100%",
           }}
+        >
+          <Globe
+            ref={globeRef}
+            backgroundColor={"rgba(0, 0, 0, 0)"}
+            globeMaterial={globeMaterial}
 
-          /* точки (агенты/цели) */
-          pointsData={combinedPoints}
-          pointLat={pointLatAccessor}
-          pointLng={pointLngAccessor}
-          pointAltitude={0.01}
-          pointColor={pointColorAccessor}
-          pointRadius={pointRadiusAccessor}
-          pointLabel={pointLabelAccessor}
+            /* атмосфера и фон */
+            showAtmosphere
+            atmosphereColor={SEA_GLOW}
+            atmosphereAltitude={0.25}
 
-          /* дуги */
-          arcsData={arcs}
-          arcStartLat={arcStartLatAccessor}
-          arcStartLng={arcStartLngAccessor}
-          arcEndLat={arcEndLatAccessor}
-          arcEndLng={arcEndLngAccessor}
-          arcColor={arcColorAccessor}
-          arcAltitude={0.25}
-          arcStroke={0.6}
-          arcDashLength={0.45}
-          arcDashGap={0.2}
-          arcDashAnimateTime={1600}
+            /* материки */
+            polygonsData={polygons}
+            polygonAltitude={0.02}
+            polygonCapColor={() => LAND_CAP}
+            polygonSideColor={() => LAND_SIDE}
+            polygonStrokeColor={() => LAND_STROKE}
+            polygonsTransitionDuration={0}
 
-          /* интерактив */
-          enablePointerInteraction={true}
-        />
+            polygonLabel={(feat) => {
+              const props = (feat as CountryFeature).properties || {};
+              return (
+                (props.name as string) ||
+                (props.ADMIN as string) ||
+                (props.name_long as string) ||
+                ""
+              );
+            }}
+
+            /* точки (агенты/цели) */
+            pointsData={combinedPoints}
+            pointLat={pointLatAccessor}
+            pointLng={pointLngAccessor}
+            pointAltitude={0.01}
+            pointColor={pointColorAccessor}
+            pointRadius={pointRadiusAccessor}
+            pointLabel={pointLabelAccessor}
+
+            /* дуги */
+            arcsData={arcs}
+            arcStartLat={arcStartLatAccessor}
+            arcStartLng={arcStartLngAccessor}
+            arcEndLat={arcEndLatAccessor}
+            arcEndLng={arcEndLngAccessor}
+            arcColor={arcColorAccessor}
+            arcAltitude={0.25}
+            arcStroke={0.6}
+            arcDashLength={0.45}
+            arcDashGap={0.2}
+            arcDashAnimateTime={1600}
+
+            /* интерактив */
+            enablePointerInteraction={true}
+          />
+        </div>
       </div>
     </div>
   );

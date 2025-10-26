@@ -60,6 +60,11 @@ const USER_POINT_ID = "user-location";
 
 export default function MapGlobe({ userLocation }: MapGlobeProps) {
   const globeRef = useRef<GlobeMethods | undefined>(undefined);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [containerSize, setContainerSize] = useState<{ width: number; height: number }>({
+    width: 0,
+    height: 0,
+  });
 
   const [polygons, setPolygons] = useState<CountryFeature[]>([]);
   const [arcs, setArcs] = useState<Arc[]>([]);
@@ -98,6 +103,35 @@ export default function MapGlobe({ userLocation }: MapGlobeProps) {
       .catch(() => {
         // оффлайн — просто без подписей
       });
+  }, []);
+
+  useEffect(() => {
+    const node = containerRef.current;
+    if (!node) {
+      return;
+    }
+
+    const updateSize = () => {
+      setContainerSize({ width: node.clientWidth, height: node.clientHeight });
+    };
+
+    updateSize();
+
+    if (typeof ResizeObserver !== "undefined") {
+      const observer = new ResizeObserver(() => updateSize());
+      observer.observe(node);
+      return () => observer.disconnect();
+    }
+
+    const listener = () => updateSize();
+    if (typeof window !== "undefined") {
+      window.addEventListener("resize", listener);
+    }
+    return () => {
+      if (typeof window !== "undefined") {
+        window.removeEventListener("resize", listener);
+      }
+    };
   }, []);
 
   /* ---------- простая SSE-логика (оставил как было) ---------- */
@@ -221,60 +255,63 @@ export default function MapGlobe({ userLocation }: MapGlobeProps) {
           background: MAP_BACKGROUND,
         }}
       >
-        <Globe
-          ref={globeRef}
-          backgroundColor={"rgba(0, 0, 0, 0)"}
-          globeMaterial={globeMaterial}
-          style={{ width: "100%", height: "100%" }}
+        <div ref={containerRef} style={{ position: "absolute", inset: 0 }}>
+          <Globe
+            ref={globeRef}
+            backgroundColor={"rgba(0, 0, 0, 0)"}
+            globeMaterial={globeMaterial}
+            width={containerSize.width || undefined}
+            height={containerSize.height || undefined}
 
-          /* атмосфера и фон */
-          showAtmosphere
-          atmosphereColor={SEA_GLOW}
-          atmosphereAltitude={0.25}
+            /* атмосфера и фон */
+            showAtmosphere
+            atmosphereColor={SEA_GLOW}
+            atmosphereAltitude={0.25}
 
-          /* материки */
-          polygonsData={polygons}
-          polygonAltitude={0.02}
-          polygonCapColor={() => LAND_CAP}
-          polygonSideColor={() => LAND_SIDE}
-          polygonStrokeColor={() => LAND_STROKE}
-          polygonsTransitionDuration={0}
+            /* материки */
+            polygonsData={polygons}
+            polygonAltitude={0.02}
+            polygonCapColor={() => LAND_CAP}
+            polygonSideColor={() => LAND_SIDE}
+            polygonStrokeColor={() => LAND_STROKE}
+            polygonsTransitionDuration={0}
 
-          polygonLabel={(feat) => {
-            const props = (feat as CountryFeature).properties || {};
-            return (
-              (props.name as string) ||
-              (props.ADMIN as string) ||
-              (props.name_long as string) ||
-              ""
-            );
-          }}
+            polygonLabel={(feat) => {
+              const props = (feat as CountryFeature).properties || {};
+              return (
+                (props.name as string) ||
+                (props.ADMIN as string) ||
+                (props.name_long as string) ||
+                ""
+              );
+            }}
 
-          /* точки (агенты/цели) */
-          pointsData={combinedPoints}
-          pointLat={pointLatAccessor}
-          pointLng={pointLngAccessor}
-          pointAltitude={0.01}
-          pointColor={pointColorAccessor}
-          pointRadius={pointRadiusAccessor}
-          pointLabel={pointLabelAccessor}
+            /* точки (агенты/цели) */
+            pointsData={combinedPoints}
+            pointLat={pointLatAccessor}
+            pointLng={pointLngAccessor}
+            pointAltitude={0.01}
+            pointColor={pointColorAccessor}
+            pointRadius={pointRadiusAccessor}
+            pointLabel={pointLabelAccessor}
 
-          /* дуги */
-          arcsData={arcs}
-          arcStartLat={arcStartLatAccessor}
-          arcStartLng={arcStartLngAccessor}
-          arcEndLat={arcEndLatAccessor}
-          arcEndLng={arcEndLngAccessor}
-          arcColor={arcColorAccessor}
-          arcAltitude={0.25}
-          arcStroke={0.6}
-          arcDashLength={0.45}
-          arcDashGap={0.2}
-          arcDashAnimateTime={1600}
+            /* дуги */
+            arcsData={arcs}
+            arcStartLat={arcStartLatAccessor}
+            arcStartLng={arcStartLngAccessor}
+            arcEndLat={arcEndLatAccessor}
+            arcEndLng={arcEndLngAccessor}
+            arcColor={arcColorAccessor}
+            arcAltitude={0.25}
+            arcStroke={0.6}
+            arcDashLength={0.45}
+            arcDashGap={0.2}
+            arcDashAnimateTime={1600}
 
-          /* интерактив */
-          enablePointerInteraction={true}
-        />
+            /* интерактив */
+            enablePointerInteraction={true}
+          />
+        </div>
       </div>
     </div>
   );

@@ -2,10 +2,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Globe, { GlobeMethods } from "react-globe.gl";
 import type { GlobeProps } from "react-globe.gl";
 import { feature } from "topojson-client";
-import type { FeatureCollection, Feature, MultiPolygon, Polygon } from "geojson";
-import { mapSSE } from "../lib/api";
-import type { GeometryCollection, Topology } from "topojson-specification";
+import type { FeatureCollection, Feature, GeometryCollection, MultiPolygon, Polygon } from "geojson";
 import * as THREE from "three";
+import { useMapData, type MapAgentLocation, type MapCheckInfo } from "../hooks/useMapData";
 
 /* ---------- типы точек/дуг (как у вас) ---------- */
 type Arc = {
@@ -42,9 +41,11 @@ type CountryProperties = { name?: string; ADMIN?: string; name_long?: string };
 
 type CountryFeature = Feature<Polygon | MultiPolygon, CountryProperties>;
 
-type CountriesTopology = Topology<{
-  countries: GeometryCollection;
-}>;
+type CountriesTopology = {
+  objects: {
+    countries: GeometryCollection;
+  };
+};
 
 /* ---------- цвета ---------- */
 const SEA_GLOW = "rgba(56,189,248,0.28)";
@@ -58,6 +59,196 @@ const MAP_BACKGROUND =
 
 const USER_POINT_ID = "user-location";
 
+const STATUS_COLORS: Record<MapCheckInfo["status"], string> = {
+  running: "#9b5de5",
+  ok: "#4ade80",
+  fail: "#ef4444",
+};
+
+const TARGET_COLORS: Record<MapCheckInfo["status"], string> = {
+  running: "#facc15",
+  ok: "#22c55e",
+  fail: "#f97316",
+};
+
+const AGENT_COLOR = "#59a5ff";
+
+type LegendEntry = {
+  id: string;
+  target: string;
+  status: MapCheckInfo["status"];
+  color: string;
+  hopCount: number;
+  reason?: string;
+  firstHop?: string;
+  sampleRtt?: number | null;
+};
+
+type GeoLike = {
+  lat?: number | null;
+  lon?: number | null;
+  city?: string | null;
+  country?: string | null;
+};
+
+const hasCoordinates = (geo?: GeoLike | null): geo is GeoLike & { lat: number; lon: number } => {
+  if (!geo) return false;
+  return (
+    typeof geo.lat === "number" && Number.isFinite(geo.lat) && typeof geo.lon === "number" && Number.isFinite(geo.lon)
+  );
+};
+
+const formatGeoLocation = (geo?: GeoLike | null): string => {
+  if (!geo) return "";
+  const parts: string[] = [];
+  if (typeof geo.city === "string" && geo.city.trim() !== "") parts.push(geo.city.trim());
+  if (typeof geo.country === "string" && geo.country.trim() !== "") parts.push(geo.country.trim());
+  return parts.join(", ");
+};
+
+const buildAgentPoint = (agent: MapAgentLocation): Dot | null => {
+  if (!hasCoordinates(agent.geo)) return null;
+  const labelParts: string[] = [];
+  const displayName = agent.name?.trim() || agent.ip || agent.id;
+  labelParts.push(`Agent ${displayName}`);
+  if (agent.ip && agent.ip !== displayName) {
+    labelParts.push(agent.ip);
+  }
+  const location = agent.locationStr?.trim() || formatGeoLocation(agent.geo);
+  if (location) labelParts.push(location);
+  return {
+    id: `agent:${agent.id}`,
+    lat: agent.geo.lat,
+    lng: agent.geo.lon,
+    color: AGENT_COLOR,
+    size: 0.38,
+    label: labelParts.join("\n"),
+  } satisfies Dot;
+};
+
+const buildCheckGraphics = (check: MapCheckInfo): { arcs: Arc[]; points: Dot[] } => {
+  const arcs: Arc[] = [];
+  const points: Dot[] = [];
+  const statusColor = STATUS_COLORS[check.status] ?? STATUS_COLORS.running;
+  const targetColor = TARGET_COLORS[check.status] ?? TARGET_COLORS.running;
+
+  const path: { lat: number; lon: number }[] = [];
+
+  const sourceGeo = hasCoordinates(check.source?.geo)
+    ? check.source?.geo
+    : hasCoordinates(check.agent?.geo)
+    ? check.agent?.geo
+    : undefined;
+
+  if (sourceGeo && hasCoordinates(sourceGeo)) {
+    path.push({ lat: sourceGeo.lat, lon: sourceGeo.lon });
+    const sourceParts: string[] = [];
+    if (check.agent?.name) {
+      sourceParts.push(`Agent ${check.agent.name}`);
+    } else if (check.source?.ip) {
+      sourceParts.push(`Source ${check.source.ip}`);
+    }
+    if (check.agent?.ip && (!check.agent.name || check.agent.ip !== check.source?.ip)) {
+      sourceParts.push(check.agent.ip);
+    }
+    const sourceLoc = check.source?.label?.trim() || formatGeoLocation(check.source?.geo ?? check.agent?.geo);
+    if (sourceLoc) sourceParts.push(sourceLoc);
+    if (sourceParts.length > 0) {
+      points.push({
+        id: `source:${check.id}`,
+        lat: sourceGeo.lat,
+        lng: sourceGeo.lon,
+        color: statusColor,
+        size: 0.35,
+        label: sourceParts.join(" • "),
+      });
+    }
+  }
+
+  check.hops.forEach((hop) => {
+    if (!hasCoordinates(hop.geo)) return;
+    path.push({ lat: hop.geo.lat, lon: hop.geo.lon });
+    const labelParts: string[] = [`Hop #${hop.order}`];
+    if (hop.ip) labelParts.push(hop.ip);
+    const location = formatGeoLocation(hop.geo);
+    if (location) labelParts.push(location);
+    if (typeof hop.rttMs === "number") labelParts.push(`RTT: ${hop.rttMs} ms`);
+    if (check.status === "fail" && check.reason) labelParts.push(`Reason: ${check.reason}`);
+    points.push({
+      id: `hop:${check.id}:${hop.order}`,
+      lat: hop.geo.lat,
+      lng: hop.geo.lon,
+      color: statusColor,
+      size: 0.28,
+      label: labelParts.join(" • "),
+    });
+  });
+
+  const targetGeo = hasCoordinates(check.target?.geo) ? check.target?.geo : undefined;
+  if (targetGeo) {
+    path.push({ lat: targetGeo.lat, lon: targetGeo.lon });
+    const labelLines: string[] = [];
+    const targetName = check.target?.host || check.target?.ip || "Target";
+    labelLines.push(targetName);
+    labelLines.push(`Status: ${check.status.toUpperCase()}`);
+    const targetLoc = check.target?.label?.trim() || formatGeoLocation(check.target?.geo);
+    if (targetLoc) labelLines.push(targetLoc);
+    if (check.reason) labelLines.push(`Reason: ${check.reason}`);
+    const hopWithRtt = check.hops.find((hop) => typeof hop.rttMs === "number");
+    if (hopWithRtt?.rttMs !== undefined) {
+      labelLines.push(`Sample RTT: ${hopWithRtt.rttMs} ms`);
+    }
+    points.push({
+      id: `target:${check.id}`,
+      lat: targetGeo.lat,
+      lng: targetGeo.lon,
+      color: targetColor,
+      size: 0.46,
+      label: labelLines.join("\n"),
+    });
+  }
+
+  for (let i = 0; i < path.length - 1; i += 1) {
+    const from = path[i];
+    const to = path[i + 1];
+    arcs.push({
+      id: `${check.id}:${i}`,
+      startLat: from.lat,
+      startLng: from.lon,
+      endLat: to.lat,
+      endLng: to.lon,
+      color: statusColor,
+      status: check.status,
+    });
+  }
+
+  return { arcs, points };
+};
+
+const buildLegendEntries = (checks: MapCheckInfo[]): LegendEntry[] => {
+  return checks.slice(0, 6).map((check) => {
+    const firstHop = check.hops[0];
+    const firstHopParts: string[] = [];
+    if (firstHop) {
+      firstHopParts.push(`#${firstHop.order}`);
+      if (firstHop.ip) firstHopParts.push(firstHop.ip);
+      const loc = formatGeoLocation(firstHop.geo);
+      if (loc) firstHopParts.push(loc);
+    }
+    const hopWithRtt = check.hops.find((hop) => typeof hop.rttMs === "number");
+    return {
+      id: check.id,
+      target: check.target?.host || check.target?.ip || "Unknown target",
+      status: check.status,
+      color: STATUS_COLORS[check.status] ?? STATUS_COLORS.running,
+      hopCount: check.hops.length,
+      reason: check.reason ?? undefined,
+      firstHop: firstHopParts.length > 0 ? firstHopParts.join(" • ") : undefined,
+      sampleRtt: hopWithRtt?.rttMs ?? null,
+    } satisfies LegendEntry;
+  });
+};
+
 export default function MapGlobe({ userLocation }: MapGlobeProps) {
   const globeRef = useRef<GlobeMethods | undefined>(undefined);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -67,8 +258,29 @@ export default function MapGlobe({ userLocation }: MapGlobeProps) {
   });
 
   const [polygons, setPolygons] = useState<CountryFeature[]>([]);
-  const [arcs, setArcs] = useState<Arc[]>([]);
-  const [points, setPoints] = useState<Dot[]>([]);
+  const { agents, checks } = useMapData();
+  const derived = useMemo(() => {
+    const nextArcs: Arc[] = [];
+    const nextPoints: Dot[] = [];
+
+    for (const agent of agents) {
+      const point = buildAgentPoint(agent);
+      if (point) nextPoints.push(point);
+    }
+
+    for (const check of checks) {
+      const { arcs: checkArcs, points: checkPoints } = buildCheckGraphics(check);
+      nextArcs.push(...checkArcs);
+      nextPoints.push(...checkPoints);
+    }
+
+    return { arcs: nextArcs, points: nextPoints };
+  }, [agents, checks]);
+
+  const arcs = derived.arcs;
+  const points = derived.points;
+  const legendEntries = useMemo(() => buildLegendEntries(checks), [checks]);
+
   const globeMaterial = useMemo(() => {
     const material = new THREE.MeshPhongMaterial({
       color: "#0a1e2a",
@@ -92,8 +304,8 @@ export default function MapGlobe({ userLocation }: MapGlobeProps) {
       .then((topologyRaw: unknown) => {
         const topo = topologyRaw as CountriesTopology;
         const fc = feature(
-          topo,
-          topo.objects.countries
+          topo as unknown as Parameters<typeof feature>[0],
+          topo.objects.countries as unknown as Parameters<typeof feature>[1]
         ) as FeatureCollection<Polygon | MultiPolygon, CountryProperties>;
 
         const feats = fc.features as CountryFeature[];
@@ -132,81 +344,6 @@ export default function MapGlobe({ userLocation }: MapGlobeProps) {
         window.removeEventListener("resize", listener);
       }
     };
-  }, []);
-
-  /* ---------- простая SSE-логика (оставил как было) ---------- */
-  useEffect(() => {
-    const es = mapSSE();
-    es.onmessage = (ev) => {
-      try {
-        const msg = JSON.parse(ev.data);
-        switch (msg.type) {
-          case "agent.online": {
-            const [lat, lng] = msg.data.geo;
-            setPoints((p) => [
-              ...p.filter((x) => x.id !== `ag:${msg.data.id}`),
-              {
-                id: `ag:${msg.data.id}`,
-                lat,
-                lng,
-                color: "#59a5ff",
-                size: 0.4,
-                label: `agent ${msg.data.ip}`,
-              },
-            ]);
-            break;
-          }
-          case "check.start": {
-            const { source, target, check_id } = msg.data;
-            const [slat, slng] = source.geo;
-            const [tlat, tlng] = target.geo;
-
-            setArcs((as) => [
-              ...as,
-              {
-                id: check_id,
-                startLat: slat,
-                startLng: slng,
-                endLat: tlat,
-                endLng: tlng,
-                color: "#9b5de5",
-                status: "running",
-              },
-            ]);
-            setPoints((p) => [
-              ...p,
-              { id: `s:${check_id}`, lat: slat, lng: slng, color: "#9b5de5", size: 0.5, label: "agent" },
-              { id: `t:${check_id}`, lat: tlat, lng: tlng, color: "#ffe66d", size: 0.5, label: target.host },
-            ]);
-            break;
-          }
-          case "check.done": {
-            const ok = !!msg.data.ok;
-            setArcs((as) =>
-              as.map((a) =>
-                a.id === msg.data.check_id
-                  ? { ...a, color: ok ? "#4ade80" : "#ef4444", status: ok ? "ok" : "fail" }
-                  : a
-              )
-            );
-            setTimeout(() => {
-              setPoints((p) =>
-                p.filter(
-                  (x) => !x.id.startsWith(`s:${msg.data.check_id}`) && !x.id.startsWith(`t:${msg.data.check_id}`)
-                )
-              );
-            }, 3000);
-            break;
-          }
-          default:
-            break;
-        }
-      } catch {
-        /* ignore */
-      }
-    };
-    es.onerror = () => {};
-    return () => es.close();
   }, []);
 
   const pointLatAccessor: GlobeProps["pointLat"] = (d) => (d as Dot).lat;
@@ -252,9 +389,86 @@ export default function MapGlobe({ userLocation }: MapGlobeProps) {
           minHeight: 360,
           overflow: "hidden",
           borderRadius: 12,
-          background: MAP_BACKGROUND,
-        }}
-      >
+      background: MAP_BACKGROUND,
+    }}
+  >
+        {legendEntries.length > 0 && (
+          <div
+            style={{
+              position: "absolute",
+              top: 16,
+              left: 16,
+              width: "min(320px, 30%)",
+              padding: "12px 16px",
+              display: "grid",
+              gap: 12,
+              borderRadius: 12,
+              border: "1px solid rgba(56,189,248,0.25)",
+              background: "rgba(2, 6, 23, 0.74)",
+              backdropFilter: "blur(12px)",
+              boxShadow: "0 18px 40px rgba(2, 6, 23, 0.55)",
+              color: "#e2e8f0",
+              zIndex: 2,
+              pointerEvents: "auto",
+            }}
+          >
+            <div
+              style={{
+                fontSize: 12,
+                letterSpacing: 0.8,
+                textTransform: "uppercase",
+                fontWeight: 600,
+                color: "#bae6fd",
+              }}
+            >
+              Active checks
+            </div>
+            <div style={{ display: "grid", gap: 10 }}>
+              {legendEntries.map((entry, idx) => (
+                <div
+                  key={entry.id}
+                  style={{
+                    display: "grid",
+                    gap: 6,
+                    paddingBottom: idx === legendEntries.length - 1 ? 0 : 8,
+                    borderBottom:
+                      idx === legendEntries.length - 1
+                        ? "none"
+                        : "1px solid rgba(56,189,248,0.18)",
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span
+                      style={{
+                        width: 10,
+                        height: 10,
+                        borderRadius: "9999px",
+                        background: entry.color,
+                        boxShadow: "0 0 12px rgba(56,189,248,0.3)",
+                      }}
+                    />
+                    <div style={{ fontWeight: 600, fontSize: 14 }}>{entry.target}</div>
+                  </div>
+                  <div style={{ fontSize: 12, color: "#94a3b8" }}>
+                    Status: {entry.status === "ok" ? "Success" : entry.status === "fail" ? "Failed" : "Running"}
+                  </div>
+                  <div style={{ fontSize: 12 }}>
+                    Hops: {entry.hopCount > 0 ? entry.hopCount : "—"}
+                  </div>
+                  {entry.firstHop && (
+                    <div style={{ fontSize: 12, color: "#cbd5f5" }}>First hop: {entry.firstHop}</div>
+                  )}
+                  {typeof entry.sampleRtt === "number" && (
+                    <div style={{ fontSize: 12, color: "#cbd5f5" }}>Sample RTT: {entry.sampleRtt} ms</div>
+                  )}
+                  {entry.reason && (
+                    <div style={{ fontSize: 12, color: "#fca5a5" }}>Reason: {entry.reason}</div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
         <div ref={containerRef} style={{ position: "absolute", inset: 0 }}>
           <Globe
             ref={globeRef}

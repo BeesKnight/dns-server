@@ -233,6 +233,7 @@ func main() {
 		rt.Get("/sites", app.handleListSites)
 		rt.Get("/sites/{id}", app.handleGetSite)
 		rt.Delete("/sites/{id}", app.handleDeleteSite)
+		rt.Get("/profile", app.handleProfile)
 
 		rt.Route("/services", func(sr chi.Router) {
 			sr.Get("/", app.handleListServices)
@@ -395,6 +396,104 @@ type serviceReviewsResp struct {
 	Reviews       []serviceReviewItem `json:"reviews"`
 	ReviewCount   int                 `json:"review_count"`
 	AverageRating float64             `json:"average_rating"`
+}
+
+type profileReview struct {
+	ID          uuid.UUID `json:"id"`
+	ServiceID   string    `json:"service_id"`
+	ServiceName string    `json:"service_name,omitempty"`
+	Rating      int       `json:"rating"`
+	Text        string    `json:"text"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+type profileResp struct {
+	LastCheckAt *time.Time      `json:"last_check_at"`
+	ReviewCount int             `json:"review_count"`
+	Reviews     []profileReview `json:"reviews"`
+}
+
+func (a *App) handleProfile(w http.ResponseWriter, r *http.Request) {
+	userHeader := strings.TrimSpace(r.Header.Get("X-User-Id"))
+	if userHeader == "" {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	userID, err := uuid.Parse(userHeader)
+	if err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	ctx := r.Context()
+
+	var lastCheck sql.NullTime
+	if err := a.pool.QueryRow(ctx,
+		`select max(created_at) from checks where created_by=$1`,
+		userID,
+	).Scan(&lastCheck); err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+
+	var reviewCount int64
+	if err := a.pool.QueryRow(ctx,
+		`select count(*)::bigint from service_reviews where user_id=$1`,
+		userID,
+	).Scan(&reviewCount); err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+
+	rows, err := a.pool.Query(ctx, `
+                select id, service_id, rating, review, created_at
+                from service_reviews
+                where user_id=$1
+                order by created_at desc
+                limit 50
+        `, userID)
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	reviews := make([]profileReview, 0)
+	for rows.Next() {
+		var item profileReview
+		if err := rows.Scan(&item.ID, &item.ServiceID, &item.Rating, &item.Text, &item.CreatedAt); err != nil {
+			http.Error(w, "db error", http.StatusInternalServerError)
+			return
+		}
+		if svc, ok := serviceIndex[item.ServiceID]; ok && svc != nil {
+			item.ServiceName = svc.Name
+		}
+		reviews = append(reviews, item)
+	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+
+	var lastCheckPtr *time.Time
+	if lastCheck.Valid {
+		t := lastCheck.Time
+		lastCheckPtr = &t
+	}
+
+	resp := profileResp{
+		LastCheckAt: lastCheckPtr,
+		ReviewCount: int(reviewCount),
+		Reviews:     reviews,
+	}
+
+	if resp.Reviews == nil {
+		resp.Reviews = make([]profileReview, 0)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 type createServiceReviewReq struct {

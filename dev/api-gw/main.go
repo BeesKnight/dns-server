@@ -181,6 +181,7 @@ func main() {
 		pr.Mount("/v1/sites", app.proxyMount(app.sitesRP))
 		pr.Mount("/v1/checks", app.proxyMount(app.sitesRP))
 		pr.Mount("/v1/services", app.proxyMount(app.sitesRP))
+		pr.Handle("/v1/profile", app.proxyHandler(app.sitesRP))
 		pr.Handle("/v1/jobs/checks", app.proxyHandler(app.jobsRP))
 	})
 

@@ -1,18 +1,9 @@
-import { useEffect, useId, useMemo, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
-/* ====================== Типы и демо-данные ====================== */
-type Service = {
-  id: string;
-  name: string;
-  url: string;
-  status: "ok" | "warn" | "bad";
-  rating: number;          // средняя оценка 0..5
-  reviews: number;         // количество отзывов
-  hourlyChecks: number[];  // 24 значения — запросы/час
-};
+import { api, type ServiceReview, type ServiceSummary } from "../lib/api";
 
-type Review = { rating: number; text: string; createdAt: number };
+/* ====================== Типы и демо-данные ====================== */
 
 function genHourly(n: number, min: number, max: number) {
   const a: number[] = [];
@@ -20,7 +11,7 @@ function genHourly(n: number, min: number, max: number) {
   return a;
 }
 
-const initial: Service[] = [
+const fallbackServices: ServiceSummary[] = [
   { id: "yt", name: "YouTube",  url: "https://youtube.com",  status: "ok",   rating: 4.7, reviews: 2381, hourlyChecks: genHourly(24, 1200, 2800) },
   { id: "gg", name: "Google",   url: "https://google.com",   status: "ok",   rating: 4.7, reviews: 2210, hourlyChecks: genHourly(24, 1000, 2500) },
   { id: "tg", name: "Telegram", url: "https://telegram.org", status: "ok",   rating: 4.6, reviews: 1975, hourlyChecks: genHourly(24,  900, 2200) },
@@ -29,7 +20,7 @@ const initial: Service[] = [
 ];
 
 /* ====================== Утилиты ====================== */
-const dot = (s: Service["status"]) =>
+const dot = (s: ServiceSummary["status"]) =>
   s === "ok"
     ? "bg-emerald-400 shadow-[0_0_12px_rgba(16,185,129,.55)]"
     : s === "warn"
@@ -42,9 +33,63 @@ const round1 = (n: number) => Number(n.toFixed(1));
 
 /* ====================== Главная страница сервисов ====================== */
 export default function Services() {
-  const [list, setList] = useState<Service[]>(initial);
+  const [list, setList] = useState<ServiceSummary[]>(fallbackServices);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [error, setError] = useState<Error | null>(null);
   const [q, setQ] = useState("");
-  const [modal, setModal] = useState<{ open: boolean; service?: Service }>({ open: false });
+  const [modal, setModal] = useState<{ open: boolean; service?: ServiceSummary }>({ open: false });
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+
+    void api
+      .listServices()
+      .then((items) => {
+        if (!cancelled) {
+          setList(items);
+          setModal((prev) => {
+            if (!prev.open || !prev.service) return prev;
+            const updated = items.find((it) => it.id === prev.service.id);
+            return updated ? { open: true, service: updated } : prev;
+          });
+        }
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        const e = err instanceof Error ? err : new Error("Не удалось загрузить данные о сервисах");
+        setError(e);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const applyStats = useCallback(
+    (serviceId: string, stats: { averageRating: number; reviewCount: number }) => {
+      const nextRating = round1(stats.averageRating);
+      setList((prev) =>
+        prev.map((item) =>
+          item.id === serviceId
+            ? { ...item, rating: nextRating, reviews: stats.reviewCount }
+            : item
+        )
+      );
+      setModal((prev) => {
+        if (!prev.open || !prev.service || prev.service.id !== serviceId) return prev;
+        return {
+          open: true,
+          service: { ...prev.service, rating: nextRating, reviews: stats.reviewCount },
+        };
+      });
+    },
+    []
+  );
 
   const filtered = useMemo(() => {
     const s = q.trim().toLowerCase();
@@ -88,6 +133,17 @@ export default function Services() {
           />
         </div>
       </div>
+
+      {loading && (
+        <div className="mt-4 text-sm text-slate-400">
+          Загружаем актуальные данные о сервисах…
+        </div>
+      )}
+      {error && (
+        <div className="mt-3 rounded-2xl border border-rose-500/40 bg-rose-500/10 px-4 py-2 text-sm text-rose-200">
+          {error.message}
+        </div>
+      )}
 
       <h1 className="mt-6 mb-3 text-2xl font-bold">Популярные сервисы</h1>
 
@@ -197,20 +253,7 @@ export default function Services() {
         <ReviewsModal
           service={modal.service}
           onClose={() => setModal({ open: false })}
-          onAdd={(r) => {
-            // обновляем среднюю оценку и счётчик у сервиса
-            setList((prev) =>
-              prev.map((x) =>
-                x.id === modal.service!.id
-                  ? {
-                      ...x,
-                      reviews: x.reviews + 1,
-                      rating: round1(((x.rating * x.reviews) + r.rating) / (x.reviews + 1)),
-                    }
-                  : x
-              )
-            );
-          }}
+          onStats={applyStats}
         />
       )}
     </div>
@@ -293,18 +336,24 @@ function MiniBarsWithAxis({ data }: { data: number[] }) {
 function ReviewsModal({
   service,
   onClose,
-  onAdd,
+  onStats,
 }: {
-  service: Service;
+  service: ServiceSummary;
   onClose: () => void;
-  onAdd: (r: Review) => void;
+  onStats: (serviceId: string, stats: { averageRating: number; reviewCount: number }) => void;
 }) {
-  const storageKey = `reviews:${service.id}`;
-  const [list, setList] = useState<Review[]>(
-    JSON.parse(localStorage.getItem(storageKey) || "[]")
-  );
+  const [list, setList] = useState<ServiceReview[]>([]);
   const [rate, setRate] = useState<number>(5);
   const [text, setText] = useState<string>("");
+  const [loading, setLoading] = useState<boolean>(true);
+  const [error, setError] = useState<Error | null>(null);
+  const [submitting, setSubmitting] = useState<boolean>(false);
+  const [submitError, setSubmitError] = useState<Error | null>(null);
+  const statsRef = useRef(onStats);
+
+  useEffect(() => {
+    statsRef.current = onStats;
+  }, [onStats]);
 
   // esc для закрытия, блокировка прокрутки тела
   useEffect(() => {
@@ -318,15 +367,62 @@ function ReviewsModal({
     };
   }, [onClose]);
 
-  function submit() {
-    if (!text.trim()) return;
-    const r: Review = { rating: rate, text: text.trim(), createdAt: Date.now() };
-    const next = [r, ...list];
-    setList(next);
-    localStorage.setItem(storageKey, JSON.stringify(next));
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    setSubmitError(null);
+    setList([]);
+    setRate(5);
     setText("");
-    onAdd(r);
-  }
+
+    void api
+      .listServiceReviews(service.id)
+      .then((data) => {
+        if (cancelled) return;
+        setList(data.reviews);
+        statsRef.current?.(service.id, {
+          averageRating: data.averageRating,
+          reviewCount: data.reviewCount,
+        });
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        const e = err instanceof Error ? err : new Error("Не удалось загрузить отзывы");
+        setError(e);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [service.id]);
+
+  const submit = async () => {
+    const trimmed = text.trim();
+    if (!trimmed || submitting) return;
+    setSubmitting(true);
+    setSubmitError(null);
+    try {
+      const result = await api.createServiceReview(service.id, {
+        rating: rate,
+        text: trimmed,
+      });
+      setList((prev) => [result.review, ...prev]);
+      setText("");
+      statsRef.current?.(service.id, {
+        averageRating: result.averageRating,
+        reviewCount: result.reviewCount,
+      });
+    } catch (err) {
+      const e = err instanceof Error ? err : new Error("Не удалось отправить отзыв");
+      setSubmitError(e);
+    } finally {
+      setSubmitting(false);
+    }
+  };
 
   return (
     <div
@@ -379,44 +475,54 @@ function ReviewsModal({
             rows={4}
           />
 
-          <div className="mt-3 flex justify-end">
+          <div className="mt-3 flex flex-col items-end gap-2">
+            {submitError && (
+              <div className="w-full rounded-xl border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-sm text-rose-200">
+                {submitError.message}
+              </div>
+            )}
             <button
               onClick={submit}
-              className="inline-flex items-center gap-2 rounded-2xl border border-white/10
-                         bg-slate-900/55 hover:bg-slate-900/70 backdrop-blur-xl
-                         px-3 py-2 text-sm font-semibold text-slate-200 shadow-lg transition"
+              disabled={submitting || !text.trim()}
+              className={`inline-flex items-center gap-2 rounded-2xl border border-white/10 bg-slate-900/55 px-3 py-2 text-sm font-semibold text-slate-200 shadow-lg transition ${
+                submitting || !text.trim() ? "cursor-not-allowed opacity-60" : "hover:bg-slate-900/70"
+              }`}
             >
-              Отправить
+              {submitting ? "Отправляем…" : "Отправить"}
             </button>
           </div>
         </div>
 
         {/* Список отзывов */}
         <div className="mt-4 max-h-[50vh] space-y-3 overflow-y-auto pr-1">
-          {list.length === 0 && (
+          {loading && <div className="text-slate-400">Загружаем отзывы…</div>}
+          {error && (
+            <div className="rounded-xl border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-200">
+              {error.message}
+            </div>
+          )}
+          {!loading && !error && list.length === 0 && (
             <div className="text-slate-400">Пока нет отзывов — будьте первым.</div>
           )}
-          {list.map((r, i) => (
-            <div
-              key={i}
-              className="rounded-xl border border-white/10 bg-white/5 p-3"
-            >
-              <div className="mb-1 text-yellow-300">
-                {Array.from({ length: r.rating }).map((_, k) => (
-                  <span key={k}>★</span>
-                ))}
-                {Array.from({ length: 5 - r.rating }).map((_, k) => (
-                  <span key={k} className="text-slate-400/50">
-                    ★
-                  </span>
-                ))}
+          {!error &&
+            list.map((r) => (
+              <div key={r.id} className="rounded-xl border border-white/10 bg-white/5 p-3">
+                <div className="mb-1 text-yellow-300">
+                  {Array.from({ length: r.rating }).map((_, k) => (
+                    <span key={k}>★</span>
+                  ))}
+                  {Array.from({ length: 5 - r.rating }).map((_, k) => (
+                    <span key={k} className="text-slate-400/50">
+                      ★
+                    </span>
+                  ))}
+                </div>
+                <div className="whitespace-pre-wrap">{r.text}</div>
+                <div className="mt-1 text-xs text-slate-400">
+                  {new Date(r.createdAt).toLocaleString()}
+                </div>
               </div>
-              <div className="whitespace-pre-wrap">{r.text}</div>
-              <div className="mt-1 text-xs text-slate-400">
-                {new Date(r.createdAt).toLocaleString()}
-              </div>
-            </div>
-          ))}
+            ))}
         </div>
       </div>
     </div>

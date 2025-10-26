@@ -37,7 +37,10 @@ impl AppState {
 }
 
 pub fn router(state: AppState) -> Router {
-    let auth_ctx = AuthContext::new(state.store.clone(), ["/register"]);
+    let auth_ctx = AuthContext::new(
+        state.store.clone(),
+        ["/register", "/v1/agents/register"],
+    );
 
     let heartbeat_layer = middleware::from_fn_with_state(
         RateLimitContext {

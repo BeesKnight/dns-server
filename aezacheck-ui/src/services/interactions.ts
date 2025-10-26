@@ -25,14 +25,14 @@ export const interactionService = {
       pageSize: filters.pageSize ?? 50,
     });
 
-    return request<PagedResult<InteractionEntry>>(`interactions?${search.toString()}`, {
+    return request<PagedResult<InteractionEntry>>(`v1/interactions?${search.toString()}`, {
       ...options,
       method: "get",
     });
   },
 
   create(payload: InteractionPayload, options?: HttpRequestOptions): HttpRequest<InteractionEntry> {
-    return request<InteractionEntry>("interactions", {
+    return request<InteractionEntry>("v1/interactions", {
       ...options,
       method: "post",
       json: payload,

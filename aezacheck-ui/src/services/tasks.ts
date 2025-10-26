@@ -23,14 +23,14 @@ export const taskService = {
       pageSize: filters.pageSize ?? 50,
     });
 
-    return request<PagedResult<TaskSummary>>(`tasks?${search.toString()}`, {
+    return request<PagedResult<TaskSummary>>(`v1/tasks?${search.toString()}`, {
       ...options,
       method: "get",
     });
   },
 
   update(id: string, mutation: TaskMutation, options?: HttpRequestOptions): HttpRequest<TaskSummary> {
-    return request<TaskSummary>(`tasks/${id}`, {
+    return request<TaskSummary>(`v1/tasks/${id}`, {
       ...options,
       method: "patch",
       json: mutation,
@@ -38,7 +38,7 @@ export const taskService = {
   },
 
   cancel(id: string, options?: HttpRequestOptions): HttpRequest<TaskSummary> {
-    return request<TaskSummary>(`tasks/${id}/cancel`, {
+    return request<TaskSummary>(`v1/tasks/${id}/cancel`, {
       ...options,
       method: "post",
     });

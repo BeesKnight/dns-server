@@ -957,6 +957,7 @@ type Geo struct {
 	Country string  `json:"country,omitempty"`
 	City    string  `json:"city,omitempty"`
 	ASN     int     `json:"asn,omitempty"`
+	ASNOrg  string  `json:"asn_org,omitempty"`
 }
 type cityDB interface {
 	City(net.IP) (*geoip2.City, error)
@@ -1094,6 +1095,9 @@ func (a *App) geoLookup(ipStr string) (*Geo, bool) {
 		if asn, err := a.geo.asn.ASN(ip); err == nil {
 			success = true
 			out.ASN = int(asn.AutonomousSystemNumber)
+			if org := strings.TrimSpace(asn.AutonomousSystemOrganization); org != "" {
+				out.ASNOrg = org
+			}
 		}
 	}
 	if !success {

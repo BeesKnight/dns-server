@@ -31,11 +31,15 @@ const toNumber = (value: string | undefined, fallback: number) => {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 };
 
-const BASE_URL = ((): string => {
+const normalizeBase = (value: string) => value.replace(/\/?$/, "");
+
+export const resolveApiBase = (): string => {
   const explicit = import.meta.env.VITE_API_BASE?.trim();
-  if (explicit) return explicit.replace(/\/?$/, "");
-  return import.meta.env.DEV ? "/api" : "/v1";
-})();
+  if (explicit) return normalizeBase(explicit);
+  return normalizeBase(import.meta.env.DEV ? "/api" : "/v1");
+};
+
+const BASE_URL = resolveApiBase();
 
 const DEFAULT_TIMEOUT = toNumber(import.meta.env.VITE_API_TIMEOUT, 15000);
 const DEFAULT_RETRIES = toNumber(import.meta.env.VITE_API_RETRY_LIMIT, 2);

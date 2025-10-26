@@ -13,7 +13,7 @@ export default function CheckSheet({ open, onOpenChange }: Props) {
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  // лёгкая инфа о текущем подключении (берём из /v1/auth/me)
+  // лёгкая инфа о текущем подключении (берём из /auth/me)
   const [ip, setIp] = useState<string | null>(null);
   useEffect(() => {
     api

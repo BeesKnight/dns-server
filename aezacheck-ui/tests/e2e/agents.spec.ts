@@ -5,7 +5,7 @@ test.beforeEach(async ({ page }) => {
     window.localStorage.setItem("access_token", "e2e-token");
   });
 
-  await page.route("**/api/v1/auth/me", async (route) => {
+  await page.route("**/api/auth/me", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -110,7 +110,7 @@ test.beforeEach(async ({ page }) => {
 test("отображает список агентов и детали", async ({ page }) => {
   await page.goto("/app/agents");
   await expect(page.getByText("Консоль агентов")).toBeVisible();
-  await expect(page.getByText("QA Agent")).toBeVisible();
+  await expect(page.getByText("QA Agent").first()).toBeVisible();
   await expect(page.getByText("Статусы задач")).toBeVisible();
   await expect(page.getByText("История взаимодействий")).toBeVisible();
 });

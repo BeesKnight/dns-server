@@ -234,6 +234,7 @@ func main() {
 		rt.Get("/sites/{id}", app.handleGetSite)
 		rt.Delete("/sites/{id}", app.handleDeleteSite)
 		rt.Get("/profile", app.handleProfile)
+		rt.Get("/me", app.handleProfile)
 
 		rt.Route("/services", func(sr chi.Router) {
 			sr.Get("/", app.handleListServices)
@@ -398,21 +399,6 @@ type serviceReviewsResp struct {
 	AverageRating float64             `json:"average_rating"`
 }
 
-type profileReview struct {
-	ID          uuid.UUID `json:"id"`
-	ServiceID   string    `json:"service_id"`
-	ServiceName string    `json:"service_name,omitempty"`
-	Rating      int       `json:"rating"`
-	Text        string    `json:"text"`
-	CreatedAt   time.Time `json:"created_at"`
-}
-
-type profileResp struct {
-	LastCheckAt *time.Time      `json:"last_check_at"`
-	ReviewCount int             `json:"review_count"`
-	Reviews     []profileReview `json:"reviews"`
-}
-
 func (a *App) handleProfile(w http.ResponseWriter, r *http.Request) {
 	userHeader := strings.TrimSpace(r.Header.Get("X-User-Id"))
 	if userHeader == "" {
@@ -447,29 +433,52 @@ func (a *App) handleProfile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := a.pool.Query(ctx, `
-                select id, service_id, rating, review, created_at
-                from service_reviews
-                where user_id=$1
-                order by created_at desc
-                limit 50
-        `, userID)
+select id, service_id, rating, created_at
+from service_reviews
+where user_id=$1
+order by created_at desc
+limit 50
+`, userID)
 	if err != nil {
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
 
+	type profileReview struct {
+		ID          uuid.UUID `json:"id"`
+		ServiceID   string    `json:"serviceId"`
+		ServiceName string    `json:"serviceName"`
+		Rating      int       `json:"rating"`
+		CreatedAt   time.Time `json:"createdAt"`
+	}
+
 	reviews := make([]profileReview, 0)
 	for rows.Next() {
-		var item profileReview
-		if err := rows.Scan(&item.ID, &item.ServiceID, &item.Rating, &item.Text, &item.CreatedAt); err != nil {
+		var (
+			id        uuid.UUID
+			serviceID string
+			rating    int
+			createdAt time.Time
+		)
+		if err := rows.Scan(&id, &serviceID, &rating, &createdAt); err != nil {
 			http.Error(w, "db error", http.StatusInternalServerError)
 			return
 		}
-		if svc, ok := serviceIndex[item.ServiceID]; ok && svc != nil {
-			item.ServiceName = svc.Name
+		serviceName := strings.TrimSpace(serviceID)
+		if svc, ok := serviceIndex[serviceID]; ok && svc != nil {
+			serviceName = svc.Name
 		}
-		reviews = append(reviews, item)
+		if serviceName == "" {
+			serviceName = "Неизвестный сервис"
+		}
+		reviews = append(reviews, profileReview{
+			ID:          id,
+			ServiceID:   serviceID,
+			ServiceName: serviceName,
+			Rating:      rating,
+			CreatedAt:   createdAt,
+		})
 	}
 	if err := rows.Err(); err != nil {
 		http.Error(w, "db error", http.StatusInternalServerError)
@@ -482,7 +491,11 @@ func (a *App) handleProfile(w http.ResponseWriter, r *http.Request) {
 		lastCheckPtr = &t
 	}
 
-	resp := profileResp{
+	resp := struct {
+		LastCheckAt *time.Time      `json:"lastCheckAt"`
+		ReviewCount int             `json:"reviewCount"`
+		Reviews     []profileReview `json:"reviews"`
+	}{
 		LastCheckAt: lastCheckPtr,
 		ReviewCount: int(reviewCount),
 		Reviews:     reviews,

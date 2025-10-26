@@ -68,15 +68,19 @@ curl -H "Content-Type: application/json" -d '{"agent_id":7,"capacities":{"dns":4
 
 ```bash
 cargo run --bin control_plane -- create-agent my-agent
+# при необходимости можно указать другой control plane
+# cargo run --bin control_plane -- create-agent my-agent --base-url http://api-gw:8088/v1/agents
 ```
 
-Команда применит миграции (если нужно), создаст или обновит запись агента с указанным hostname (либо возьмёт имя текущей машины) и выведет:
+Команда отправит HTTP-запрос `POST /v1/agents/register` (по умолчанию на `http://127.0.0.1:8088/v1/agents`) и создаст или обновит запись агента с указанным hostname (либо возьмёт имя текущей машины) в control plane. Базовый URL можно переопределить флагом `--base-url` или переменными окружения `CONTROL_PLANE_BASE_URL`/`AGENT_CONTROL_PLANE`.
+
+В ответ CLI выведет:
 
 - `ID` — значение для переменной `AGENT_ID`.
 - `Token` — значение для `AGENT_AUTH_TOKEN`.
 - `Lease duration (ms)` и `Heartbeat timeout (ms)` — параметры договора аренды.
 
-Скопируйте `ID`/`Token` в `dev/dns-agent/secrets.env` или переменные окружения контейнера и перезапустите агент. После старта он выполнит bootstrap уже с готовыми кредами и должен появиться в консоли агентов.
+Скопируйте `ID`/`Token` в `dev/dns-agent/secrets.env` или переменные окружения контейнера и перезапустите агент. После старта он выполнит bootstrap уже с готовыми кредами, а запись появится в консоли агентов (UI запрашивает данные из `/v1/agents`).
 
 ## Эксплуатация Ansible плейбуков
 1. Убедитесь, что `group_vars/all/vault.yml` создан и зашифрован (`ansible-vault encrypt ...`).【F:README-ops.md†L8-L33】

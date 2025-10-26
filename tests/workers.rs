@@ -102,8 +102,10 @@ worker_test!(worker_pool_respects_concurrency_limits, {
     pool_config.set_concurrency(TaskKind::Dns, 2);
 
     let handler = Arc::new(LatchingHandler::new(2));
-    let mut handlers = WorkerHandlers::default();
-    handlers.dns = handler.clone();
+    let handlers = WorkerHandlers {
+        dns: handler.clone(),
+        ..WorkerHandlers::default()
+    };
 
     let pools = spawn_worker_pools(pool_config, queues, handlers, reporter.clone(), None)
         .expect("worker pools spawn");
@@ -134,8 +136,10 @@ worker_test!(worker_pool_recovers_from_panics, {
     pool_config.set_concurrency(TaskKind::Dns, 2);
 
     let handler = Arc::new(PanicOnceHandler::new());
-    let mut handlers = WorkerHandlers::default();
-    handlers.dns = handler.clone();
+    let handlers = WorkerHandlers {
+        dns: handler.clone(),
+        ..WorkerHandlers::default()
+    };
 
     let pools = spawn_worker_pools(pool_config, queues, handlers, reporter.clone(), None)
         .expect("spawn worker pools");
@@ -180,8 +184,10 @@ worker_test!(worker_reports_cancellation, {
     pool_config.set_concurrency(TaskKind::Dns, 1);
 
     let handler = Arc::new(CancellableHandler::new());
-    let mut handlers = WorkerHandlers::default();
-    handlers.dns = handler.clone();
+    let handlers = WorkerHandlers {
+        dns: handler.clone(),
+        ..WorkerHandlers::default()
+    };
 
     let pools = spawn_worker_pools(pool_config, queues, handlers, reporter.clone(), None)
         .expect("spawn worker pools");

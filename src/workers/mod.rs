@@ -24,6 +24,7 @@ use crate::dispatcher::{DispatchQueues, DispatchedLease, LeaseAssignment};
 use crate::lease_extender::LeaseExtenderClient;
 
 mod ping;
+pub mod storage;
 mod tcp;
 mod trace;
 
@@ -272,8 +273,8 @@ impl WorkerHandlers {
 
     pub fn default_handlers() -> Self {
         Self {
-            dns: Arc::new(DnsWorker::default()),
-            http: Arc::new(HttpWorker::default()),
+            dns: Arc::new(DnsWorker),
+            http: Arc::new(HttpWorker),
             tcp: Arc::new(TcpWorker::default()),
             ping: Arc::new(PingWorker::default()),
             trace: Arc::new(TraceWorker::default()),
@@ -411,6 +412,7 @@ where
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_pool<R>(
     label: &'static str,
     kind: TaskKind,

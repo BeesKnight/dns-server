@@ -26,6 +26,13 @@ metrics = "0.23"
 socket2 = { version = "0.5", features = ["all"] }
 rand = "0.8"
 pnet_packet = "0.34"
+axum = { version = "0.7", features = ["json"] }
+tower = { version = "0.4", features = ["util"] }
+tower-http = { version = "0.5", features = ["trace"] }
+sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "macros", "chrono", "uuid", "migrate"] }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["serde", "v4"] }
+http = "1"
 
 [dev-dependencies]
 futures = "0.3"

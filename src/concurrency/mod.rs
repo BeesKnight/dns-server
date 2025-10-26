@@ -5,6 +5,10 @@ use tokio::sync::Notify;
 
 use crate::control_plane::TaskKind;
 
+mod persistence;
+
+pub use persistence::{ConcurrencyPersistence, ConcurrencyStateStore};
+
 type TargetId = u64;
 
 /// Configuration describing the static ceilings for concurrency control.
@@ -39,16 +43,32 @@ pub struct ConcurrencyController {
     notify: Arc<Notify>,
     additive_step: f64,
     decrease_factor: f64,
+    persistence: Option<ConcurrencyPersistence>,
 }
 
 impl ConcurrencyController {
     pub fn new(limits: ConcurrencyLimits) -> Self {
+        Self::with_optional_persistence(limits, None)
+    }
+
+    pub fn with_persistence(
+        limits: ConcurrencyLimits,
+        persistence: ConcurrencyPersistence,
+    ) -> Self {
+        Self::with_optional_persistence(limits, Some(persistence))
+    }
+
+    fn with_optional_persistence(
+        limits: ConcurrencyLimits,
+        persistence: Option<ConcurrencyPersistence>,
+    ) -> Self {
         let inner = ControllerInner::new(limits);
         Self {
             inner: Arc::new(Mutex::new(inner)),
             notify: Arc::new(Notify::new()),
             additive_step: 1.0,
             decrease_factor: 0.5,
+            persistence,
         }
     }
 
@@ -58,7 +78,17 @@ impl ConcurrencyController {
                 let mut inner = self.inner.lock().expect("controller mutex poisoned");
                 inner.try_acquire(kind, target)
             };
-            if acquired {
+            if let Some(snapshot) = acquired {
+                if let Some(persistence) = &self.persistence {
+                    persistence.record_global(snapshot.global.limit, snapshot.global.inflight);
+                    persistence.record_kind(kind, snapshot.kind.limit, snapshot.kind.inflight);
+                    persistence.record_target(
+                        kind,
+                        target,
+                        snapshot.target.limit,
+                        snapshot.target.inflight,
+                    );
+                }
                 return ConcurrencyPermit {
                     controller: self.clone(),
                     kind,
@@ -100,13 +130,46 @@ impl ConcurrencyController {
         if adjustments.notified {
             self.notify.notify_waiters();
         }
+        if let Some(persistence) = &self.persistence {
+            if let Some(global) = adjustments.global {
+                persistence.record_global(global.limit, global.inflight);
+            }
+            if let Some(kind_snapshot) = adjustments.kind {
+                persistence.record_kind(kind, kind_snapshot.limit, kind_snapshot.inflight);
+            }
+            if let Some(target_snapshot) = adjustments.target {
+                persistence.record_target(
+                    kind,
+                    target,
+                    target_snapshot.limit,
+                    target_snapshot.inflight,
+                );
+            }
+        }
     }
 
     fn release(&self, kind: TaskKind, target: TargetId) {
         let mut inner = self.inner.lock().expect("controller mutex poisoned");
-        if inner.release(kind, target) {
-            drop(inner);
+        let result = inner.release(kind, target);
+        if result.notified {
             self.notify.notify_one();
+        }
+        drop(inner);
+        if let Some(persistence) = &self.persistence {
+            if let Some(global) = result.global {
+                persistence.record_global(global.limit, global.inflight);
+            }
+            if let Some(kind_snapshot) = result.kind {
+                persistence.record_kind(kind, kind_snapshot.limit, kind_snapshot.inflight);
+            }
+            if let Some(target_snapshot) = result.target {
+                persistence.record_target(
+                    kind,
+                    target,
+                    target_snapshot.limit,
+                    target_snapshot.inflight,
+                );
+            }
         }
     }
 }
@@ -155,11 +218,11 @@ impl ControllerInner {
         }
     }
 
-    fn try_acquire(&mut self, kind: TaskKind, target: TargetId) -> bool {
+    fn try_acquire(&mut self, kind: TaskKind, target: TargetId) -> Option<AcquireSnapshot> {
         let global_limit = self.global.limit();
         if self.global.inflight >= global_limit {
             metrics::gauge!("concurrency.backpressure", "scope" => "global").set(1.0);
-            return false;
+            return None;
         }
 
         let kind_state = self
@@ -169,7 +232,7 @@ impl ControllerInner {
         if kind_state.inflight >= kind_state.window.limit() {
             metrics::gauge!("concurrency.backpressure", "scope" => "kind", "kind" => kind_label(kind))
                 .set(1.0);
-            return false;
+            return None;
         }
 
         let key = (kind, target);
@@ -180,7 +243,7 @@ impl ControllerInner {
         if target_state.inflight >= target_state.window.limit() {
             metrics::gauge!("concurrency.backpressure", "scope" => "target", "kind" => kind_label(kind))
                 .set(1.0);
-            return false;
+            return None;
         }
 
         self.global.inflight += 1;
@@ -194,7 +257,20 @@ impl ControllerInner {
         metrics::gauge!("concurrency.inflight", "scope" => "target", "kind" => kind_label(kind))
             .set(target_state.inflight as f64);
 
-        true
+        Some(AcquireSnapshot {
+            global: WindowSnapshot {
+                limit: self.global.limit(),
+                inflight: self.global.inflight,
+            },
+            kind: WindowSnapshot {
+                limit: kind_state.window.limit(),
+                inflight: kind_state.inflight,
+            },
+            target: WindowSnapshot {
+                limit: target_state.window.limit(),
+                inflight: target_state.inflight,
+            },
+        })
     }
 
     fn available(&self, kind: TaskKind) -> usize {
@@ -211,8 +287,10 @@ impl ControllerInner {
         limit.saturating_sub(inflight)
     }
 
-    fn release(&mut self, kind: TaskKind, target: TargetId) -> bool {
+    fn release(&mut self, kind: TaskKind, target: TargetId) -> ReleaseResult {
         let key = (kind, target);
+        let mut target_snapshot = None;
+        let mut kind_snapshot = None;
         if let Some(target_state) = self.per_target.get_mut(&key) {
             if target_state.inflight > 0 {
                 target_state.inflight -= 1;
@@ -221,6 +299,10 @@ impl ControllerInner {
                 metrics::gauge!("concurrency.backpressure", "scope" => "target", "kind" => kind_label(kind))
                     .set(0.0);
             }
+            target_snapshot = Some(WindowSnapshot {
+                limit: target_state.window.limit(),
+                inflight: target_state.inflight,
+            });
         }
 
         if let Some(kind_state) = self.per_kind.get_mut(&kind) {
@@ -231,6 +313,10 @@ impl ControllerInner {
                 metrics::gauge!("concurrency.backpressure", "scope" => "kind", "kind" => kind_label(kind))
                     .set(0.0);
             }
+            kind_snapshot = Some(WindowSnapshot {
+                limit: kind_state.window.limit(),
+                inflight: kind_state.inflight,
+            });
         }
 
         if self.global.inflight > 0 {
@@ -242,7 +328,15 @@ impl ControllerInner {
         metrics::gauge!("concurrency.inflight", "scope" => "global")
             .set(self.global.inflight as f64);
 
-        true
+        ReleaseResult {
+            notified: true,
+            global: Some(WindowSnapshot {
+                limit: self.global.limit(),
+                inflight: self.global.inflight,
+            }),
+            kind: kind_snapshot,
+            target: target_snapshot,
+        }
     }
 
     fn apply_outcome(
@@ -315,12 +409,52 @@ impl ControllerInner {
             }
         }
 
-        AdjustmentResult { notified }
+        let global_snapshot = WindowSnapshot {
+            limit: self.global.limit(),
+            inflight: self.global.inflight,
+        };
+        let kind_snapshot = WindowSnapshot {
+            limit: kind_state.window.limit(),
+            inflight: kind_state.inflight,
+        };
+        let target_snapshot = WindowSnapshot {
+            limit: target_state.window.limit(),
+            inflight: target_state.inflight,
+        };
+
+        AdjustmentResult {
+            notified,
+            global: Some(global_snapshot),
+            kind: Some(kind_snapshot),
+            target: Some(target_snapshot),
+        }
     }
 }
 
 struct AdjustmentResult {
     notified: bool,
+    global: Option<WindowSnapshot>,
+    kind: Option<WindowSnapshot>,
+    target: Option<WindowSnapshot>,
+}
+
+#[derive(Clone, Copy)]
+struct WindowSnapshot {
+    limit: usize,
+    inflight: usize,
+}
+
+struct AcquireSnapshot {
+    global: WindowSnapshot,
+    kind: WindowSnapshot,
+    target: WindowSnapshot,
+}
+
+struct ReleaseResult {
+    notified: bool,
+    global: Option<WindowSnapshot>,
+    kind: Option<WindowSnapshot>,
+    target: Option<WindowSnapshot>,
 }
 
 struct WindowState {
@@ -395,7 +529,7 @@ struct OutcomeStats {
     errors: u64,
 }
 
-fn kind_label(kind: TaskKind) -> &'static str {
+pub(super) fn kind_label(kind: TaskKind) -> &'static str {
     match kind {
         TaskKind::Dns => "dns",
         TaskKind::Http => "http",
@@ -449,7 +583,7 @@ mod tests {
         controller.record_success(TaskKind::Dns, 1);
         controller.record_success(TaskKind::Dns, 1);
         let available = controller.available(TaskKind::Dns);
-        assert!(available >= 4 - 0, "window should grow towards ceiling");
+        assert!(available >= 4, "window should grow towards ceiling");
     }
 
     #[tokio::test]

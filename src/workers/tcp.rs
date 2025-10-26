@@ -8,7 +8,6 @@ use async_trait::async_trait;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use serde_json::json;
-use socket2::{SockRef, TcpKeepalive};
 use tokio::net::TcpSocket;
 use tokio::task;
 use tokio::time::{sleep, Instant};
@@ -328,7 +327,7 @@ async fn run_attempt(
 fn delay_for(index: usize) -> Duration {
     HAPPY_EYEBALLS_DELAY
         .checked_mul(index as u32)
-        .unwrap_or_else(|| HAPPY_EYEBALLS_DELAY)
+        .unwrap_or(HAPPY_EYEBALLS_DELAY)
 }
 
 async fn connect_once(address: SocketAddr, configurator: SocketConfigurator) -> io::Result<()> {

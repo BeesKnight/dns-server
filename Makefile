@@ -1,7 +1,7 @@
 ANSIBLE ?= ansible-playbook
 INVENTORY ?= inventories/prod
 
-.PHONY: deploy deploy-local ansible-check ansible-lint
+.PHONY: deploy deploy-local ansible-check ansible-lint test ci
 
 deploy:
 $(ANSIBLE) -i $(INVENTORY) playbooks/site.yml
@@ -14,3 +14,8 @@ $(ANSIBLE) -i inventories/local playbooks/site.yml --check -e orchestration_skip
 
 ansible-lint:
 ansible-lint playbooks/site.yml
+
+test:
+	cargo test --all
+
+ci: test

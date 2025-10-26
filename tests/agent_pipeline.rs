@@ -283,8 +283,10 @@ worker_test!(pipeline_tcp_worker_produces_observations, {
     let (ingress, queues, dispatcher_handle) = spawn_dispatcher(dispatcher_config);
 
     let reporter = CollectingReporter::default();
-    let mut handlers = WorkerHandlers::default();
-    handlers.tcp = Arc::new(TcpWorker::default());
+    let handlers = WorkerHandlers {
+        tcp: Arc::new(TcpWorker::default()),
+        ..WorkerHandlers::default()
+    };
 
     let pools = spawn_worker_pools(
         WorkerPoolsConfig::new(),

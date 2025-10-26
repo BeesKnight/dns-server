@@ -13,7 +13,12 @@ const API_BASE = import.meta.env.VITE_API_BASE?.replace(/\/?$/, "") ?? (import.m
 
 import { request } from "../services";
 
-const call = async <T>(path: string, init: RequestInit & { method?: string; body?: unknown } = {}): Promise<T> => {
+type CallInit = Omit<RequestInit, "body"> & {
+  method?: string;
+  body?: unknown;
+};
+
+const call = async <T>(path: string, init: CallInit = {}): Promise<T> => {
   let payload = init.body;
   if (typeof payload === "string") {
     try {

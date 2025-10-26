@@ -40,12 +40,21 @@ const BASE_URL = ((): string => {
 const DEFAULT_TIMEOUT = toNumber(import.meta.env.VITE_API_TIMEOUT, 15000);
 const DEFAULT_RETRIES = toNumber(import.meta.env.VITE_API_RETRY_LIMIT, 2);
 
+type RetryOptions = Exclude<Options["retry"], number | undefined>;
+
+const DEFAULT_RETRY_CONFIG: RetryOptions = {
+  limit: DEFAULT_RETRIES,
+  methods: ["get", "post", "put", "patch", "delete"],
+  statusCodes: [408, 409, 425, 429, 500, 502, 503, 504],
+  backoffLimit: 2,
+};
+
 const createClient = (): KyInstance =>
   ky.create({
     prefixUrl: BASE_URL,
     hooks: {
       beforeRequest: [
-        (request) => {
+        (request: Request) => {
           if (typeof window !== "undefined") {
             const token = window.localStorage.getItem("access_token");
             if (token) {
@@ -55,28 +64,8 @@ const createClient = (): KyInstance =>
           request.headers.set("Accept", "application/json");
         },
       ],
-      beforeError: [
-        async (error) => {
-          if (error instanceof HTTPError) {
-            try {
-              const data = await error.response.clone().json();
-              const message = data?.message || error.message;
-              return new ApiError(message, { status: error.response.status, details: data });
-            } catch {
-              const text = await error.response.clone().text().catch(() => "");
-              return new ApiError(text || error.message, { status: error.response.status });
-            }
-          }
-          return error;
-        },
-      ],
     },
-    retry: {
-      limit: DEFAULT_RETRIES,
-      methods: ["get", "post", "put", "patch", "delete"],
-      statusCodes: [408, 409, 425, 429, 500, 502, 503, 504],
-      backoffLimit: 2,
-    },
+    retry: DEFAULT_RETRY_CONFIG,
     timeout: DEFAULT_TIMEOUT,
   });
 
@@ -84,17 +73,26 @@ const http = createClient();
 
 const normalizeMethod = (method?: HttpMethod): HttpMethod => method ?? "get";
 
-function withErrorHandling<T>(promise: Promise<T>): Promise<T> {
-  return promise.catch((error) => {
+async function withErrorHandling<T>(promise: Promise<T>): Promise<T> {
+  try {
+    return await promise;
+  } catch (error: unknown) {
     if (error instanceof ApiError) throw error;
     if (error instanceof HTTPError) {
-      throw new ApiError(error.message, { status: error.response.status });
+      try {
+        const data = await error.response.clone().json();
+        const message = typeof data?.message === "string" ? data.message : error.message;
+        throw new ApiError(message, { status: error.response.status, details: data });
+      } catch {
+        const text = await error.response.clone().text().catch(() => "");
+        throw new ApiError(text || error.message, { status: error.response.status });
+      }
     }
     if (error instanceof Error) {
       throw new ApiError(error.message);
     }
     throw new ApiError("Unexpected error");
-  });
+  }
 }
 
 export function request<T>(input: string, options: HttpRequestOptions = {}): HttpRequest<T> {
@@ -117,15 +115,13 @@ export function request<T>(input: string, options: HttpRequestOptions = {}): Htt
 
   if (typeof timeoutMs === "number") mergedOptions.timeout = timeoutMs;
   if (typeof retryLimit === "number") {
-    mergedOptions.retry = {
-      ...http.options.retry,
-      limit: retryLimit,
-    };
+    mergedOptions.retry = { ...DEFAULT_RETRY_CONFIG, limit: retryLimit } satisfies RetryOptions;
+  } else {
+    mergedOptions.retry = DEFAULT_RETRY_CONFIG;
   }
   if (json !== undefined) mergedOptions.json = json;
 
-  const kyInstance = http.extend({});
-  const promise = withErrorHandling(kyInstance(input, mergedOptions).json<T>());
+  const promise = withErrorHandling<T>(http(input, mergedOptions).json<T>());
 
   return {
     promise,

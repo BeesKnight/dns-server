@@ -150,6 +150,7 @@ downloads/
 eggs/
 .eggs/
 lib/
+!aezacheck-ui/src/lib/
 lib64/
 parts/
 sdist/

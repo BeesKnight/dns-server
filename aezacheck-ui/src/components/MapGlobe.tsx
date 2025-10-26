@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Globe, { GlobeMethods } from "react-globe.gl";
 import type { GlobeProps } from "react-globe.gl";
 import { feature } from "topojson-client";
@@ -27,6 +27,16 @@ type Dot = {
   label?: string;
 };
 
+type UserLocation = {
+  lat: number;
+  lon: number;
+  label?: string;
+};
+
+type MapGlobeProps = {
+  userLocation?: UserLocation | null;
+};
+
 /* ---------- типы стран/подписей ---------- */
 type CountryProperties = { name?: string; ADMIN?: string; name_long?: string };
 
@@ -51,7 +61,9 @@ const LAND_SIDE = "rgba(15, 23, 42, .92)";
 const LAND_STROKE = "rgba(56, 189, 248, .35)";
 const LABEL_COLOR = "rgba(226,232,240,.92)";
 
-export default function MapGlobe() {
+const USER_POINT_ID = "user-location";
+
+export default function MapGlobe({ userLocation }: MapGlobeProps) {
   const globeRef = useRef<GlobeMethods | undefined>(undefined);
   const camAltRef = useRef(1.6);         // текущая высота камеры
   const [tick, setTick] = useState(0);   // лёгкий триггер пересчёта LOD
@@ -250,6 +262,28 @@ export default function MapGlobe() {
   const arcEndLngAccessor: GlobeProps["arcEndLng"] = (d) => (d as Arc).endLng;
   const arcColorAccessor: GlobeProps["arcColor"] = (d: object) => (d as Arc).color;
 
+  const combinedPoints = useMemo(() => {
+    const basePoints = points.filter((point) => point.id !== USER_POINT_ID);
+    if (!userLocation) return basePoints;
+
+    const { lat, lon, label } = userLocation;
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+      return basePoints;
+    }
+
+    return [
+      ...basePoints,
+      {
+        id: USER_POINT_ID,
+        lat,
+        lng: lon,
+        color: "#f97316",
+        size: 0.7,
+        label: label ?? "Ваше подключение",
+      },
+    ];
+  }, [points, userLocation]);
+
   return (
     <div className="h-[70vh] md:h-[80vh] w-full">
       <Globe
@@ -283,7 +317,7 @@ export default function MapGlobe() {
         labelIncludeDot={false}
 
         /* точки (агенты/цели) */
-        pointsData={points}
+        pointsData={combinedPoints}
         pointLat={pointLatAccessor}
         pointLng={pointLngAccessor}
         pointAltitude={0.01}

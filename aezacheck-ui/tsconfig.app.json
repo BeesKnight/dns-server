@@ -14,7 +14,7 @@
     "isolatedModules": true,
     "noEmit": true,
 
-    "types": ["react", "react-dom", "vite/client"],
+    "types": ["react", "react-dom", "vite/client", "d3-geo"],
 
     "strict": true,
     "noUnusedLocals": false,

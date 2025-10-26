@@ -28,6 +28,10 @@ const HOVER_FILL = "#1b6b66";
 const ATTACK_COLOR = "#ff4bd6";
 const ATTACK_WIDTH = 2.8;
 const ATTACK_LIFETIME_MS = 2000;
+const USER_MARKER_GLOW = "rgba(249, 115, 22, 0.32)";
+const USER_MARKER_RING = "rgba(249, 115, 22, 0.16)";
+const USER_MARKER_FILL = "#fff7ed";
+const USER_MARKER_STROKE = "#f97316";
 
 type WorldFeature = Feature<Polygon | MultiPolygon, { NAME?: string; name?: string }>;
 type Attack = { id: number; from: [number, number]; to: [number, number]; };
@@ -52,6 +56,12 @@ type NetworkRoute = {
   gradient: [string, string];
 };
 
+type UserLocation = {
+  lat: number;
+  lon: number;
+  label?: string;
+};
+
 type HoverState =
   | { type: "country"; name: string; x: number; y: number }
   | {
@@ -66,11 +76,19 @@ type HoverState =
       y: number;
       route: NetworkRoute;
       stats: { jitter: number; packetLoss: number };
+    }
+  | {
+      type: "user";
+      x: number;
+      y: number;
+      title: string;
+      subtitle?: string;
     };
 
 type Props = {
   /** на сколько пикселей опустить карту вниз */
   offsetTop?: number;
+  userLocation?: UserLocation | null;
 };
 
 const BASE_NODES: NetworkNode[] = [
@@ -252,7 +270,7 @@ function useSize<T extends HTMLElement>(ref: React.RefObject<T | null>) {
   return size;
 }
 
-export default function Map2D({ offsetTop = 0 }: Props) {
+export default function Map2D({ offsetTop = 0, userLocation }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
 
   // важно: высоту считаем от уже "подрезанного" контейнера
@@ -368,6 +386,21 @@ export default function Map2D({ offsetTop = 0 }: Props) {
       return projection([lng, lat]) as [number, number];
     };
   }, [projection]);
+
+  const userMarker = useMemo(() => {
+    if (!userLocation) return null;
+    const { lat, lon, label } = userLocation;
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+    const [x, y] = projectPoint(lon, lat);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+    const subtitle = label?.trim() ? label.trim() : undefined;
+    return {
+      x,
+      y,
+      title: "Ваше подключение",
+      subtitle,
+    };
+  }, [projectPoint, userLocation]);
 
   const createArcPath = useMemo(() => {
     return (from: [number, number], to: [number, number]) => {
@@ -497,6 +530,25 @@ export default function Map2D({ offsetTop = 0 }: Props) {
       y: e.clientY - svgRect.top + 16
     });
   };
+
+  const handleUserEnter = (
+    e: ReactMouseEvent<SVGCircleElement>
+  ) => {
+    if (!userMarker) return;
+    const svgRect = (e.currentTarget as SVGElement).ownerSVGElement?.getBoundingClientRect();
+    if (!svgRect) return;
+    setHover({
+      type: "user",
+      title: userMarker.title,
+      subtitle: userMarker.subtitle,
+      x: e.clientX - svgRect.left + 14,
+      y: e.clientY - svgRect.top + 14
+    });
+  };
+
+  const handleUserLeave = () => setHover(null);
+
+  const userPulseDuration = useMemo(() => `${(4 / speedMultiplier).toFixed(2)}s`, [speedMultiplier]);
 
   return (
     <div style={{ marginTop: offsetTop }} className="w-full">
@@ -689,6 +741,34 @@ export default function Map2D({ offsetTop = 0 }: Props) {
               );
             })}
 
+            {userMarker && (
+              <g transform={`translate(${userMarker.x},${userMarker.y})`}>
+                <circle r={18} fill={USER_MARKER_RING} opacity={0.75} pointerEvents="none" />
+                <circle
+                  r={11}
+                  fill={USER_MARKER_GLOW}
+                  className="map-node"
+                  style={{ animationDuration: userPulseDuration, animationDelay: "0s" }}
+                  pointerEvents="none"
+                />
+                <circle
+                  r={7}
+                  fill={USER_MARKER_FILL}
+                  stroke={USER_MARKER_STROKE}
+                  strokeWidth={1.8}
+                  className="map-node"
+                  style={{
+                    animationDuration: userPulseDuration,
+                    animationDelay: "0s",
+                    cursor: isDragging ? "grabbing" : "pointer"
+                  }}
+                  onMouseEnter={handleUserEnter}
+                  onMouseLeave={handleUserLeave}
+                />
+                <circle r={3.2} fill={USER_MARKER_STROKE} pointerEvents="none" />
+              </g>
+            )}
+
             {attacks.map((a) => {
               const d = createArcPath(a.from, a.to);
               return (
@@ -752,6 +832,12 @@ export default function Map2D({ offsetTop = 0 }: Props) {
                 <div>
                   <span style={{ color: "#38bdf8" }}>Packet loss:</span> {hover.stats.packetLoss}%
                 </div>
+              </div>
+            )}
+            {hover.type === "user" && (
+              <div style={{ display: "grid", gap: 4 }}>
+                <div style={{ fontWeight: 600 }}>{hover.title}</div>
+                {hover.subtitle && <div style={{ color: "#94a3b8" }}>{hover.subtitle}</div>}
               </div>
             )}
           </div>

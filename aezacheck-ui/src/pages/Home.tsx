@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import MapGlobe from "../components/MapGlobe";
 import Map2D from "../components/Map2D";
 import CheckSheet from "../components/CheckSheet";
+import { useConnection } from "../store/connection";
 
 function BgFX() {
   return (
@@ -19,6 +20,23 @@ function BgFX() {
 export default function Home() {
   const [mode, setMode] = useState<"2D" | "3D">("3D");
   const [open, setOpen] = useState(true);
+  const { geo, ip } = useConnection();
+
+  const userLocation = useMemo(() => {
+    if (!geo) return null;
+    const { lat, lon, city, country } = geo;
+    if (typeof lat !== "number" || typeof lon !== "number") {
+      return null;
+    }
+
+    const labelParts: string[] = [];
+    if (city) labelParts.push(city);
+    if (country) labelParts.push(country);
+    const locationText = labelParts.join(", ").trim();
+    const label = locationText.length > 0 ? locationText : (ip ? `IP ${ip}` : undefined);
+
+    return { lat, lon, label };
+  }, [geo, ip]);
 
   return (
     <div className="relative min-h-screen overflow-hidden">
@@ -79,7 +97,7 @@ export default function Home() {
 
       {/* карта */}
       <div className="px-4 py-8 md:py-10">
-        {mode === "2D" ? <Map2D /> : <MapGlobe />}
+        {mode === "2D" ? <Map2D userLocation={userLocation} /> : <MapGlobe userLocation={userLocation} />}
       </div>
 
       <CheckSheet open={open} onOpenChange={setOpen} />

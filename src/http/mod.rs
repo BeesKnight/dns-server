@@ -121,9 +121,13 @@ pub fn router(state: AppState) -> Router {
         .route("/config", get(config).route_layer(config_layer))
         .layer(middleware::from_fn_with_state(auth_ctx, require_auth));
 
-    Router::new()
+    let agents = Router::new()
         .route("/register", post(register))
-        .merge(protected)
+        .merge(protected);
+
+    Router::new()
+        .merge(agents.clone())
+        .nest("/v1/agents", agents)
         .with_state(state)
         .layer(http_trace_layer())
 }

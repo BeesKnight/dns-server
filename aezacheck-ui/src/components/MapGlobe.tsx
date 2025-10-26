@@ -5,6 +5,7 @@ import { feature } from "topojson-client";
 import type { FeatureCollection, Feature, MultiPolygon, Polygon } from "geojson";
 import { mapSSE } from "../lib/api";
 import type { GeometryCollection, Topology } from "topojson-specification";
+import * as THREE from "three";
 
 /* ---------- типы точек/дуг (как у вас) ---------- */
 type Arc = {
@@ -46,10 +47,10 @@ type CountriesTopology = Topology<{
 }>;
 
 /* ---------- цвета ---------- */
-const SEA_GLOW = "#63a3ff";
-const LAND_CAP = "#0f3b37"; // тёмно-зелёный
-const LAND_SIDE = "rgba(15, 23, 42, .92)";
-const LAND_STROKE = "rgba(56, 189, 248, .35)";
+const SEA_GLOW = "rgba(56,189,248,0.28)";
+const LAND_CAP = "#124f4c";
+const LAND_SIDE = "#15524f";
+const LAND_STROKE = "rgba(56,189,248,.12)";
 
 const USER_POINT_ID = "user-location";
 
@@ -59,6 +60,18 @@ export default function MapGlobe({ userLocation }: MapGlobeProps) {
   const [polygons, setPolygons] = useState<CountryFeature[]>([]);
   const [arcs, setArcs] = useState<Arc[]>([]);
   const [points, setPoints] = useState<Dot[]>([]);
+  const globeMaterial = useMemo(() => {
+    const material = new THREE.MeshStandardMaterial({
+      color: "#0a1e2a",
+      emissive: "#06121b",
+      emissiveIntensity: 0.35,
+      metalness: 0.1,
+      roughness: 0.85,
+    });
+
+    material.needsUpdate = true;
+    return material;
+  }, []);
 
   /* ---------- загрузка карт ---------- */
   useEffect(() => {
@@ -192,61 +205,72 @@ export default function MapGlobe({ userLocation }: MapGlobeProps) {
   }, [points, userLocation]);
 
   return (
-    <div className="h-[70vh] md:h-[80vh] w-full">
-      <Globe
-        ref={globeRef}
-        backgroundColor="rgba(0,0,0,0)"
-
-        /* атмосфера и фон */
-        showAtmosphere
-        atmosphereColor={SEA_GLOW}
-        atmosphereAltitude={0.25}
-        globeImageUrl="//unpkg.com/three-globe/example/img/earth-dark.jpg"
-        bumpImageUrl="//unpkg.com/three-globe/example/img/earth-topology.png"
-
-        /* материки */
-        polygonsData={polygons}
-        polygonAltitude={0.02}
-        polygonCapColor={() => LAND_CAP}
-        polygonSideColor={() => LAND_SIDE}
-        polygonStrokeColor={() => LAND_STROKE}
-        polygonsTransitionDuration={0}
-
-        polygonLabel={(feat) => {
-          const props = (feat as CountryFeature).properties || {};
-          return (
-            (props.name as string) ||
-            (props.ADMIN as string) ||
-            (props.name_long as string) ||
-            ""
-          );
+    <div className="w-full">
+      <div
+        className="relative h-[70vh] md:h-[80vh] w-full"
+        style={{
+          overflow: "hidden",
+          borderRadius: 12,
+          background:
+            "radial-gradient(circle at 20% 30%, rgba(34,197,247,0.22), transparent 55%), " +
+            "radial-gradient(circle at 80% 15%, rgba(56,189,248,0.18), transparent 60%), " +
+            "linear-gradient(180deg,#050b1a 0%, #09142a 55%, #03070f 100%)",
         }}
+      >
+        <Globe
+          ref={globeRef}
+          backgroundColor="rgba(0,0,0,0)"
+          globeMaterial={globeMaterial}
 
-        /* точки (агенты/цели) */
-        pointsData={combinedPoints}
-        pointLat={pointLatAccessor}
-        pointLng={pointLngAccessor}
-        pointAltitude={0.01}
-        pointColor={pointColorAccessor}
-        pointRadius={pointRadiusAccessor}
-        pointLabel={pointLabelAccessor}
+          /* атмосфера и фон */
+          showAtmosphere
+          atmosphereColor={SEA_GLOW}
+          atmosphereAltitude={0.25}
 
-        /* дуги */
-        arcsData={arcs}
-        arcStartLat={arcStartLatAccessor}
-        arcStartLng={arcStartLngAccessor}
-        arcEndLat={arcEndLatAccessor}
-        arcEndLng={arcEndLngAccessor}
-        arcColor={arcColorAccessor}
-        arcAltitude={0.25}
-        arcStroke={0.6}
-        arcDashLength={0.45}
-        arcDashGap={0.2}
-        arcDashAnimateTime={1600}
+          /* материки */
+          polygonsData={polygons}
+          polygonAltitude={0.02}
+          polygonCapColor={() => LAND_CAP}
+          polygonSideColor={() => LAND_SIDE}
+          polygonStrokeColor={() => LAND_STROKE}
+          polygonsTransitionDuration={0}
 
-        /* интерактив */
-        enablePointerInteraction={true}
-      />
+          polygonLabel={(feat) => {
+            const props = (feat as CountryFeature).properties || {};
+            return (
+              (props.name as string) ||
+              (props.ADMIN as string) ||
+              (props.name_long as string) ||
+              ""
+            );
+          }}
+
+          /* точки (агенты/цели) */
+          pointsData={combinedPoints}
+          pointLat={pointLatAccessor}
+          pointLng={pointLngAccessor}
+          pointAltitude={0.01}
+          pointColor={pointColorAccessor}
+          pointRadius={pointRadiusAccessor}
+          pointLabel={pointLabelAccessor}
+
+          /* дуги */
+          arcsData={arcs}
+          arcStartLat={arcStartLatAccessor}
+          arcStartLng={arcStartLngAccessor}
+          arcEndLat={arcEndLatAccessor}
+          arcEndLng={arcEndLngAccessor}
+          arcColor={arcColorAccessor}
+          arcAltitude={0.25}
+          arcStroke={0.6}
+          arcDashLength={0.45}
+          arcDashGap={0.2}
+          arcDashAnimateTime={1600}
+
+          /* интерактив */
+          enablePointerInteraction={true}
+        />
+      </div>
     </div>
   );
 }

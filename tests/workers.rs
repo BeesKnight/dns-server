@@ -301,7 +301,7 @@ async fn dns_worker_emits_record_observations() {
     let token = CancellationToken::new();
     let assignment = LeaseAssignment::new(lease, token);
 
-    let worker = dns_agent::workers::DnsWorker::default();
+    let worker = dns_agent::workers::DnsWorker;
     let report = worker
         .handle(assignment)
         .await

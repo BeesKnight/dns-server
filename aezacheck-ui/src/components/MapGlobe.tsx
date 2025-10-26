@@ -51,6 +51,10 @@ const SEA_GLOW = "rgba(56,189,248,0.28)";
 const LAND_CAP = "#124f4c";
 const LAND_SIDE = "#15524f";
 const LAND_STROKE = "rgba(56,189,248,.12)";
+const MAP_BACKGROUND =
+  "radial-gradient(circle at 20% 30%, rgba(34,197,247,0.22), transparent 55%), " +
+  "radial-gradient(circle at 80% 15%, rgba(56,189,248,0.18), transparent 60%), " +
+  "linear-gradient(180deg,#050b1a 0%, #09142a 55%, #03070f 100%)";
 
 const USER_POINT_ID = "user-location";
 
@@ -61,12 +65,12 @@ export default function MapGlobe({ userLocation }: MapGlobeProps) {
   const [arcs, setArcs] = useState<Arc[]>([]);
   const [points, setPoints] = useState<Dot[]>([]);
   const globeMaterial = useMemo(() => {
-    const material = new THREE.MeshStandardMaterial({
+    const material = new THREE.MeshPhongMaterial({
       color: "#0a1e2a",
-      emissive: "#06121b",
-      emissiveIntensity: 0.35,
-      metalness: 0.1,
-      roughness: 0.85,
+      emissive: new THREE.Color("#06121b"),
+      emissiveIntensity: 0.32,
+      shininess: 0,
+      specular: new THREE.Color(0x000000),
     });
 
     material.needsUpdate = true;
@@ -207,20 +211,21 @@ export default function MapGlobe({ userLocation }: MapGlobeProps) {
   return (
     <div className="w-full">
       <div
-        className="relative h-[70vh] md:h-[80vh] w-full"
         style={{
+          position: "relative",
+          width: "100%",
+          aspectRatio: "2 / 1",
+          minHeight: 360,
           overflow: "hidden",
           borderRadius: 12,
-          background:
-            "radial-gradient(circle at 20% 30%, rgba(34,197,247,0.22), transparent 55%), " +
-            "radial-gradient(circle at 80% 15%, rgba(56,189,248,0.18), transparent 60%), " +
-            "linear-gradient(180deg,#050b1a 0%, #09142a 55%, #03070f 100%)",
+          background: MAP_BACKGROUND,
         }}
       >
         <Globe
           ref={globeRef}
           backgroundColor="rgba(0,0,0,0)"
           globeMaterial={globeMaterial}
+          style={{ width: "100%", height: "100%" }}
 
           /* атмосфера и фон */
           showAtmosphere

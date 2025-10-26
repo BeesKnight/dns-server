@@ -35,40 +35,60 @@ const round1 = (n: number) => Number(n.toFixed(1));
 export default function Services() {
   const [list, setList] = useState<ServiceSummary[]>(fallbackServices);
   const [loading, setLoading] = useState<boolean>(true);
+  const [refreshing, setRefreshing] = useState<boolean>(false);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [error, setError] = useState<Error | null>(null);
   const [q, setQ] = useState("");
   const [modal, setModal] = useState<{ open: boolean; service?: ServiceSummary }>({ open: false });
 
   useEffect(() => {
+    // TODO: при появлении SSE/WebSocket потока заменить опрос на подписку,
+    // чтобы получать обновления без постоянных запросов.
     let cancelled = false;
-    setLoading(true);
-    setError(null);
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let isInitial = true;
 
-    void api
-      .listServices()
-      .then((items) => {
-        if (!cancelled) {
-          setList(items);
-          setModal((prev) => {
-            if (!prev.open) return prev;
-            const prevService = prev.service;
-            if (!prevService) return prev;
-            const updated = items.find((it) => it.id === prevService.id);
-            return updated ? { open: true, service: updated } : prev;
-          });
-        }
-      })
-      .catch((err) => {
+    const fetchServices = async () => {
+      if (cancelled) return;
+      if (isInitial) {
+        setLoading(true);
+      } else {
+        setRefreshing(true);
+      }
+      setError(null);
+
+      try {
+        const items = await api.listServices();
+        if (cancelled) return;
+        setList(items);
+        setLastUpdated(new Date());
+        setModal((prev) => {
+          if (!prev.open) return prev;
+          const prevService = prev.service;
+          if (!prevService) return prev;
+          const updated = items.find((it) => it.id === prevService.id);
+          return updated ? { open: true, service: updated } : prev;
+        });
+      } catch (err) {
         if (cancelled) return;
         const e = err instanceof Error ? err : new Error("Не удалось загрузить данные о сервисах");
         setError(e);
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
+      } finally {
+        if (cancelled) return;
+        if (isInitial) {
+          setLoading(false);
+          isInitial = false;
+        }
+        setRefreshing(false);
+        timer = setTimeout(fetchServices, 10_000);
+      }
+    };
+
+    void fetchServices();
 
     return () => {
       cancelled = true;
+      if (timer) clearTimeout(timer);
     };
   }, []);
 
@@ -139,6 +159,19 @@ export default function Services() {
       {loading && (
         <div className="mt-4 text-sm text-slate-400">
           Загружаем актуальные данные о сервисах…
+        </div>
+      )}
+      {!loading && (
+        <div className="mt-3 text-xs text-slate-400">
+          {refreshing
+            ? "Обновляем данные…"
+            : lastUpdated
+            ? `Обновлено: ${lastUpdated.toLocaleTimeString("ru-RU", {
+                hour: "2-digit",
+                minute: "2-digit",
+                second: "2-digit",
+              })}`
+            : ""}
         </div>
       )}
       {error && (

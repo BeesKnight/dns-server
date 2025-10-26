@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.6
 
-FROM rust:1.80-bullseye AS builder
+FROM rust:1.82-bullseye AS builder
 WORKDIR /app
 
 RUN apt-get update \
@@ -13,6 +13,7 @@ RUN apt-get update \
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY src ./src
 COPY tests ./tests
+COPY infra/migrations ./infra/migrations
 
 RUN cargo build --release --bin dns_agent
 

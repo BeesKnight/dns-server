@@ -12,7 +12,7 @@
 
 ## Предварительные требования
 Для локальной разработки и эксплуатации потребуются:
-- **Rust** 1.80 или новее (указано как минимальная версия в `Cargo.toml`).【F:Cargo.toml†L1-L8】
+- **Rust** 1.82 или новее (указано как минимальная версия в `Cargo.toml`).【F:Cargo.toml†L1-L8】
 - **Docker** и **Docker Compose** (используются для сервисов auth/sites/jobs/api-gw и зависимостей).【F:docker-compose.yml†L1-L46】
 - **Python 3.11**, **Ansible 9.x**, **ansible-lint 24.x** для работы с плейбуками (см. README-ops).【F:README-ops.md†L8-L24】
 - Опционально: зависимости из `requirements-ansible.txt`, если требуется фиксированная версия инструментов.【F:README-ops.md†L8-L24】

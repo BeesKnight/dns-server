@@ -138,6 +138,24 @@ async fn register_and_heartbeat_flow() {
 }
 
 #[tokio::test]
+async fn register_endpoint_accessible_under_versioned_namespace() {
+    let (app, _) = setup_app().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/agents/register")
+                .header("content-type", "application/json")
+                .body(Body::from(json!(RegisterRequest::default()).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn rate_limit_is_enforced() {
     let (app, _) = setup_app().await;
     let response = app

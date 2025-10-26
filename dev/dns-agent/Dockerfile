@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1.6
 
-FROM rust:1.82-bullseye AS builder
+ARG DOCKER_LIBRARY_REGISTRY=public.ecr.aws/docker/library
+FROM ${DOCKER_LIBRARY_REGISTRY}/rust:1.82-bullseye AS builder
 WORKDIR /app
 
 RUN apt-get update \
@@ -17,7 +18,7 @@ COPY infra/migrations ./infra/migrations
 
 RUN cargo build --release --bin dns_agent
 
-FROM debian:bookworm-slim AS runtime
+FROM ${DOCKER_LIBRARY_REGISTRY}/debian:bookworm-slim AS runtime
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \

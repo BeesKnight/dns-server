@@ -74,13 +74,14 @@ export default function Services() {
         const e = err instanceof Error ? err : new Error("Не удалось загрузить данные о сервисах");
         setError(e);
       } finally {
-        if (cancelled) return;
-        if (isInitial) {
-          setLoading(false);
-          isInitial = false;
+        if (!cancelled) {
+          if (isInitial) {
+            setLoading(false);
+            isInitial = false;
+          }
+          setRefreshing(false);
+          timer = setTimeout(fetchServices, 10_000);
         }
-        setRefreshing(false);
-        timer = setTimeout(fetchServices, 10_000);
       }
     };
 

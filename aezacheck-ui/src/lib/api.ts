@@ -12,6 +12,7 @@ export type GeoInfo = {
   lon: number | null;
   city: string | null;
   country: string | null;
+  country_name: string | null;
   asn: number | null;
   asn_org: string | null;
 };
@@ -21,6 +22,7 @@ type RawGeoInfo = {
   lon?: number | string | null;
   city?: string | null;
   country?: string | null;
+  country_name?: string | null;
   asn?: number | string | null;
   asn_org?: string | null;
 };
@@ -88,11 +90,42 @@ export type CheckResults = {
   results: CheckResult[];
 };
 
+export type CheckGeoEndpoint = {
+  kind?: string | null;
+  host?: string | null;
+  ip?: string | null;
+  geo?: GeoInfo | null;
+};
+
+export type CheckGeoAgent = {
+  id?: string | null;
+  ip?: string | null;
+  name?: string | null;
+  version?: string | null;
+  geo?: GeoInfo | null;
+};
+
+export type CheckGeoTraceHop = {
+  n?: number | null;
+  ip?: string | null;
+  geo?: GeoInfo | null;
+  [key: string]: unknown;
+};
+
+export type CheckGeoDetails = {
+  checkId: string;
+  source?: CheckGeoEndpoint | null;
+  targets: CheckGeoEndpoint[];
+  agent?: CheckGeoAgent | null;
+  traceHops: CheckGeoTraceHop[];
+};
+
 export type MapGeo = {
   lat: number;
   lon: number;
   city?: string | null;
   country?: string | null;
+  country_name?: string | null;
   asn?: number | null;
   asn_org?: string | null;
 };
@@ -190,11 +223,44 @@ type RawCheckResults = {
   results: RawCheckResult[];
 };
 
+type RawCheckGeoEndpoint = {
+  kind?: string | null;
+  host?: string | null;
+  ip?: string | null;
+  geo?: RawGeoInfo | null;
+};
+
+type RawCheckGeoAgent = RawCheckGeoEndpoint & {
+  id?: string | null;
+  name?: string | null;
+  version?: string | null;
+};
+
+type RawCheckGeoTraceHop = {
+  n?: number | string | null;
+  ip?: string | null;
+  geo?: RawGeoInfo | null;
+  [key: string]: unknown;
+};
+
+type RawCheckGeoTrace = {
+  hops?: RawCheckGeoTraceHop[] | null;
+};
+
+type RawCheckGeo = {
+  check_id: string;
+  source?: RawCheckGeoEndpoint | null;
+  targets?: RawCheckGeoEndpoint[] | null;
+  agent?: RawCheckGeoAgent | null;
+  trace?: RawCheckGeoTrace | RawCheckGeoTraceHop[] | null;
+};
+
 type RawMapGeo = {
   lat?: number | string | null;
   lon?: number | string | null;
   city?: string | null;
   country?: string | null;
+  country_name?: string | null;
   asn?: number | string | null;
   asn_org?: string | null;
 };
@@ -291,6 +357,111 @@ const mapCheckResults = (raw: RawCheckResults): CheckResults => ({
   results: Array.isArray(raw.results) ? raw.results.map(mapCheckResult) : [],
 });
 
+const mapCheckGeoEndpoint = (
+  item: RawCheckGeoEndpoint | null | undefined
+): CheckGeoEndpoint | null => {
+  if (!item) return null;
+  const endpoint: CheckGeoEndpoint = {};
+  let hasData = false;
+  if (typeof item.kind === "string" && item.kind.trim() !== "") {
+    endpoint.kind = item.kind.trim();
+    hasData = true;
+  }
+  if (typeof item.host === "string" && item.host.trim() !== "") {
+    endpoint.host = item.host.trim();
+    hasData = true;
+  }
+  if (typeof item.ip === "string" && item.ip.trim() !== "") {
+    endpoint.ip = item.ip.trim();
+    hasData = true;
+  }
+  const geo = mapGeoInfo(item.geo);
+  if (geo) {
+    endpoint.geo = geo;
+    hasData = true;
+  }
+  return hasData ? endpoint : null;
+};
+
+const mapCheckGeoAgent = (
+  item: RawCheckGeoAgent | null | undefined
+): CheckGeoAgent | null => {
+  if (!item) return null;
+  const agent: CheckGeoAgent = {};
+  let hasData = false;
+  if (typeof item.id === "string" && item.id.trim() !== "") {
+    agent.id = item.id.trim();
+    hasData = true;
+  }
+  if (typeof item.name === "string" && item.name.trim() !== "") {
+    agent.name = item.name.trim();
+    hasData = true;
+  }
+  if (typeof item.version === "string" && item.version.trim() !== "") {
+    agent.version = item.version.trim();
+    hasData = true;
+  }
+  if (typeof item.ip === "string" && item.ip.trim() !== "") {
+    agent.ip = item.ip.trim();
+    hasData = true;
+  }
+  const geo = mapGeoInfo(item.geo);
+  if (geo) {
+    agent.geo = geo;
+    hasData = true;
+  }
+  return hasData ? agent : null;
+};
+
+const mapCheckGeoTraceHop = (hop: RawCheckGeoTraceHop): CheckGeoTraceHop => {
+  const mapped: CheckGeoTraceHop = {};
+  if (hop.n !== null && hop.n !== undefined) {
+    const n = Number(hop.n);
+    if (Number.isFinite(n)) {
+      mapped.n = n;
+    }
+  }
+  if (typeof hop.ip === "string" && hop.ip.trim() !== "") {
+    mapped.ip = hop.ip.trim();
+  }
+  const geo = mapGeoInfo(hop.geo);
+  if (geo) {
+    mapped.geo = geo;
+  }
+  for (const [key, value] of Object.entries(hop)) {
+    if (key === "n" || key === "ip" || key === "geo") continue;
+    mapped[key] = value;
+  }
+  return mapped;
+};
+
+const normalizeTraceHops = (
+  trace: RawCheckGeoTrace | RawCheckGeoTraceHop[] | null | undefined
+): RawCheckGeoTraceHop[] => {
+  if (!trace) return [];
+  if (Array.isArray(trace)) return trace;
+  if (Array.isArray(trace.hops)) return trace.hops;
+  return [];
+};
+
+const mapCheckGeo = (raw: RawCheckGeo): CheckGeoDetails => {
+  const source = mapCheckGeoEndpoint(raw.source);
+  const targets = Array.isArray(raw.targets)
+    ? raw.targets
+        .map((item) => mapCheckGeoEndpoint(item))
+        .filter((item): item is CheckGeoEndpoint => item !== null)
+    : [];
+  const agent = mapCheckGeoAgent(raw.agent);
+  const traceHops = normalizeTraceHops(raw.trace).map(mapCheckGeoTraceHop);
+  return {
+    checkId: raw.check_id,
+    source: source ?? null,
+    targets,
+    agent: agent ?? null,
+    traceHops,
+  } satisfies CheckGeoDetails;
+};
+
 const toNumberOrNull = (value: number | string | null | undefined) => {
   if (value === null || value === undefined) return null;
   if (typeof value === "string") {
@@ -310,6 +481,7 @@ const mapGeoInfo = (geo: RawGeoInfo | null | undefined): GeoInfo | null => {
     lon: toNumberOrNull(geo.lon),
     city: geo.city ?? null,
     country: geo.country ?? null,
+    country_name: geo.country_name ?? null,
     asn: toNumberOrNull(geo.asn),
     asn_org: geo.asn_org ?? null,
   } satisfies GeoInfo;
@@ -327,6 +499,7 @@ const mapMapGeo = (geo: RawMapGeo | null | undefined): MapGeo | null => {
     lon,
     city: geo.city ?? null,
     country: geo.country ?? null,
+    country_name: geo.country_name ?? null,
     asn: geo.asn === null || geo.asn === undefined ? null : Number(geo.asn),
     asn_org: geo.asn_org ?? null,
   } satisfies MapGeo;
@@ -465,6 +638,13 @@ export const api = {
       `jobs/checks/${encodeURIComponent(checkId)}`
     );
     return mapCheckResults(data);
+  },
+
+  getCheckGeo: async (checkId: string) => {
+    const data = await call<RawCheckGeo>(
+      `checks/${encodeURIComponent(checkId)}/geo`
+    );
+    return mapCheckGeo(data);
   },
 
   // --- map ---

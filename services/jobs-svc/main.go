@@ -54,6 +54,10 @@ type Config struct {
 	QuickRatePerUser   int
 	QuickRatePerIP     int
 
+	PopularCheckInterval  time.Duration
+	PopularSnapshotWindow time.Duration
+	PopularSnapshotStale  time.Duration
+
 	// SSE/карта
 	PubPrefix       string // для check-upd:* каналов (пер-чековые SSE)
 	MapPubChannel   string // "map:events"
@@ -119,6 +123,10 @@ func loadConfig() Config {
 		QuickRatePerUser:   ienv("QUICK_RATE_PER_USER", 5),
 		QuickRatePerIP:     ienv("QUICK_RATE_PER_IP", 15),
 
+		PopularCheckInterval:  denv("POPULAR_CHECK_INTERVAL", "5m"),
+		PopularSnapshotWindow: denv("POPULAR_SNAPSHOT_WINDOW", "24h"),
+		PopularSnapshotStale:  denv("POPULAR_SNAPSHOT_STALE", "30m"),
+
 		PubPrefix:       env("PUB_PREFIX", "check-upd:"),
 		MapPubChannel:   env("MAP_PUB_CHANNEL", "map:events"),
 		MapStream:       env("MAP_STREAM", "map_events"),
@@ -167,6 +175,7 @@ func main() {
 
 	// фон: перераздача истёкших аренд
 	go app.retryLoop()
+	go app.popularServiceLoop(ctx)
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID, middleware.RealIP, middleware.Recoverer, middleware.Logger, withTimeout(25*time.Second))
@@ -844,6 +853,8 @@ func (a *App) handleReport(w http.ResponseWriter, r *http.Request) {
 			_, _ = a.pool.Exec(r.Context(), `delete from leases where external_id=$1`, c.LeaseID)
 			_ = a.redis.Del(r.Context(), leaseKey(streamID)).Err()
 			_, _ = a.redis.XDel(r.Context(), a.cfg.StreamTasks, streamID).Result()
+
+			a.refreshPopularSnapshot(r.Context(), checkID)
 
 			var pending int
 			_ = a.pool.QueryRow(r.Context(), `select count(1) from leases where check_id=$1`, checkID).Scan(&pending)

@@ -28,6 +28,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 )
@@ -88,64 +89,53 @@ type popularService struct {
 	BaseReviews  int
 }
 
-var (
-	popularServices = []popularService{
-		{
-			ID:           "yt",
-			Name:         "YouTube",
-			URL:          "https://youtube.com",
-			Status:       "ok",
-			HourlyChecks: hourlySeries("yt", 1200, 2800),
-			BaseRating:   4.7,
-			BaseReviews:  2381,
-		},
-		{
-			ID:           "gg",
-			Name:         "Google",
-			URL:          "https://google.com",
-			Status:       "ok",
-			HourlyChecks: hourlySeries("gg", 1000, 2500),
-			BaseRating:   4.7,
-			BaseReviews:  2210,
-		},
-		{
-			ID:           "tg",
-			Name:         "Telegram",
-			URL:          "https://telegram.org",
-			Status:       "ok",
-			HourlyChecks: hourlySeries("tg", 900, 2200),
-			BaseRating:   4.6,
-			BaseReviews:  1975,
-		},
-		{
-			ID:           "dc",
-			Name:         "Discord",
-			URL:          "https://discord.com",
-			Status:       "warn",
-			HourlyChecks: hourlySeries("dc", 600, 1500),
-			BaseRating:   4.2,
-			BaseReviews:  1120,
-		},
-		{
-			ID:           "gh",
-			Name:         "GitHub",
-			URL:          "https://github.com",
-			Status:       "ok",
-			HourlyChecks: hourlySeries("gh", 400, 900),
-			BaseRating:   4.9,
-			BaseReviews:  980,
-		},
-	}
-
-	serviceIndex = func() map[string]*popularService {
-		m := make(map[string]*popularService, len(popularServices))
-		for i := range popularServices {
-			svc := &popularServices[i]
-			m[svc.ID] = svc
-		}
-		return m
-	}()
-)
+var defaultPopularServices = map[string]popularService{
+	"yt": {
+		ID:           "yt",
+		Name:         "YouTube",
+		URL:          "https://youtube.com",
+		Status:       "ok",
+		HourlyChecks: hourlySeries("yt", 1200, 2800),
+		BaseRating:   4.7,
+		BaseReviews:  2381,
+	},
+	"gg": {
+		ID:           "gg",
+		Name:         "Google",
+		URL:          "https://google.com",
+		Status:       "ok",
+		HourlyChecks: hourlySeries("gg", 1000, 2500),
+		BaseRating:   4.7,
+		BaseReviews:  2210,
+	},
+	"tg": {
+		ID:           "tg",
+		Name:         "Telegram",
+		URL:          "https://telegram.org",
+		Status:       "ok",
+		HourlyChecks: hourlySeries("tg", 900, 2200),
+		BaseRating:   4.6,
+		BaseReviews:  1975,
+	},
+	"dc": {
+		ID:           "dc",
+		Name:         "Discord",
+		URL:          "https://discord.com",
+		Status:       "warn",
+		HourlyChecks: hourlySeries("dc", 600, 1500),
+		BaseRating:   4.2,
+		BaseReviews:  1120,
+	},
+	"gh": {
+		ID:           "gh",
+		Name:         "GitHub",
+		URL:          "https://github.com",
+		Status:       "ok",
+		HourlyChecks: hourlySeries("gh", 400, 900),
+		BaseRating:   4.9,
+		BaseReviews:  980,
+	},
+}
 
 func hourlySeries(seed string, min, max int) []int {
 	if max <= min {
@@ -173,6 +163,180 @@ func aggregateRatings(svc *popularService, stats reviewStats) (float64, int) {
 	totalRating := svc.BaseRating*float64(svc.BaseReviews) + float64(stats.Sum)
 	avg := totalRating / float64(totalReviews)
 	return avg, totalReviews
+}
+
+var errPopularServiceNotFound = errors.New("popular service not found")
+
+func (a *App) loadPopularServiceViews(ctx context.Context) ([]popularService, error) {
+	rows, err := a.pool.Query(ctx, `
+                select c.id, c.name, c.url, c.base_rating, c.base_reviews,
+                       s.status, s.rating, s.sample_count, s.hourly_counts, s.last_check_at
+                  from popular_services_catalog c
+                  left join popular_service_snapshots s on s.service_id = c.id
+                 where c.is_active=true
+                 order by c.name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	services := make([]popularService, 0)
+	now := time.Now().UTC()
+	staleAfter := 30 * time.Minute
+
+	for rows.Next() {
+		var (
+			id, name, url string
+			baseRating    float64
+			baseReviews   int
+			status        sql.NullString
+			rating        sql.NullFloat64
+			sampleCount   sql.NullInt64
+			hourlyCounts  []int32
+			lastCheck     sql.NullTime
+		)
+		if err := rows.Scan(&id, &name, &url, &baseRating, &baseReviews, &status, &rating, &sampleCount, &hourlyCounts, &lastCheck); err != nil {
+			return nil, err
+		}
+
+		fallback, hasFallback := fallbackPopularService(id)
+		svc := popularService{
+			ID:          id,
+			Name:        strings.TrimSpace(name),
+			URL:         strings.TrimSpace(url),
+			BaseRating:  baseRating,
+			BaseReviews: baseReviews,
+		}
+		if hasFallback {
+			if svc.Name == "" {
+				svc.Name = fallback.Name
+			}
+			if svc.URL == "" {
+				svc.URL = fallback.URL
+			}
+		}
+
+		fresh := status.Valid && lastCheck.Valid && now.Sub(lastCheck.Time) <= staleAfter
+		if fresh {
+			svc.Status = normalizePopularStatus(status.String)
+			svc.HourlyChecks = convertHourlyCounts(hourlyCounts)
+			if len(svc.HourlyChecks) == 0 && hasFallback {
+				svc.HourlyChecks = append([]int(nil), fallback.HourlyChecks...)
+			}
+			if rating.Valid && rating.Float64 > 0 {
+				svc.BaseRating = rating.Float64
+			}
+			if sampleCount.Valid && sampleCount.Int64 > 0 {
+				svc.BaseReviews = int(sampleCount.Int64)
+			}
+		} else if hasFallback {
+			svc.Status = fallback.Status
+			svc.HourlyChecks = append([]int(nil), fallback.HourlyChecks...)
+			if svc.BaseRating == 0 {
+				svc.BaseRating = fallback.BaseRating
+			}
+			if svc.BaseReviews == 0 {
+				svc.BaseReviews = fallback.BaseReviews
+			}
+		} else {
+			svc.Status = "unknown"
+			svc.HourlyChecks = make([]int, 24)
+		}
+
+		if svc.Status == "" {
+			svc.Status = "unknown"
+		}
+		if len(svc.HourlyChecks) == 0 {
+			if hasFallback {
+				svc.HourlyChecks = append([]int(nil), fallback.HourlyChecks...)
+			} else {
+				svc.HourlyChecks = make([]int, 24)
+			}
+		}
+		if svc.BaseRating == 0 && hasFallback {
+			svc.BaseRating = fallback.BaseRating
+		}
+		if svc.BaseReviews == 0 && hasFallback {
+			svc.BaseReviews = fallback.BaseReviews
+		}
+
+		services = append(services, svc)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return services, nil
+}
+
+func (a *App) lookupPopularService(ctx context.Context, id string) (*popularService, error) {
+	var svc popularService
+	err := a.pool.QueryRow(ctx,
+		`select id, name, url, base_rating, base_reviews from popular_services_catalog where id=$1 and is_active=true`, id).
+		Scan(&svc.ID, &svc.Name, &svc.URL, &svc.BaseRating, &svc.BaseReviews)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			if fallback, ok := fallbackPopularService(id); ok {
+				return fallback, nil
+			}
+			return nil, errPopularServiceNotFound
+		}
+		return nil, err
+	}
+	fallback, hasFallback := fallbackPopularService(id)
+	if hasFallback {
+		if strings.TrimSpace(svc.Name) == "" {
+			svc.Name = fallback.Name
+		}
+		if strings.TrimSpace(svc.URL) == "" {
+			svc.URL = fallback.URL
+		}
+		if svc.BaseRating == 0 {
+			svc.BaseRating = fallback.BaseRating
+		}
+		if svc.BaseReviews == 0 {
+			svc.BaseReviews = fallback.BaseReviews
+		}
+	}
+	return &svc, nil
+}
+
+func fallbackPopularService(id string) (*popularService, bool) {
+	svc, ok := defaultPopularServices[id]
+	if !ok {
+		return nil, false
+	}
+	clone := svc
+	clone.HourlyChecks = append([]int(nil), svc.HourlyChecks...)
+	return &clone, true
+}
+
+func normalizePopularStatus(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "ok", "success", "done":
+		return "ok"
+	case "cancelled", "canceled", "timeout":
+		return "warn"
+	case "warn", "warning":
+		return "warn"
+	case "unknown":
+		return "unknown"
+	case "error", "failed":
+		return "error"
+	default:
+		return "error"
+	}
+}
+
+func convertHourlyCounts(src []int32) []int {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make([]int, len(src))
+	for i, v := range src {
+		dst[i] = int(v)
+	}
+	return dst
 }
 
 func (a *App) fetchReviewStats(ctx context.Context, ids []string) (map[string]reviewStats, error) {
@@ -455,6 +619,7 @@ limit 50
 	}
 
 	reviews := make([]profileReview, 0)
+	nameCache := make(map[string]string)
 	for rows.Next() {
 		var (
 			id        uuid.UUID
@@ -468,8 +633,19 @@ limit 50
 			return
 		}
 		serviceName := strings.TrimSpace(serviceID)
-		if svc, ok := serviceIndex[serviceID]; ok && svc != nil {
-			serviceName = svc.Name
+		if cached, ok := nameCache[serviceID]; ok {
+			serviceName = cached
+		} else {
+			if svc, err := a.lookupPopularService(r.Context(), serviceID); err == nil {
+				if strings.TrimSpace(svc.Name) != "" {
+					serviceName = svc.Name
+				}
+			} else if fallback, ok := fallbackPopularService(serviceID); ok {
+				if strings.TrimSpace(fallback.Name) != "" {
+					serviceName = fallback.Name
+				}
+			}
+			nameCache[serviceID] = serviceName
 		}
 		if serviceName == "" {
 			serviceName = "Неизвестный сервис"
@@ -826,8 +1002,14 @@ func (a *App) handleDeleteSite(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleListServices(w http.ResponseWriter, r *http.Request) {
-	ids := make([]string, 0, len(popularServices))
-	for _, svc := range popularServices {
+	services, err := a.loadPopularServiceViews(r.Context())
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+
+	ids := make([]string, 0, len(services))
+	for _, svc := range services {
 		ids = append(ids, svc.ID)
 	}
 
@@ -837,8 +1019,8 @@ func (a *App) handleListServices(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	items := make([]serviceListItem, 0, len(popularServices))
-	for _, svc := range popularServices {
+	items := make([]serviceListItem, 0, len(services))
+	for _, svc := range services {
 		st := stats[svc.ID]
 		avg, count := aggregateRatings(&svc, st)
 		items = append(items, serviceListItem{
@@ -858,9 +1040,13 @@ func (a *App) handleListServices(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleListServiceReviews(w http.ResponseWriter, r *http.Request) {
 	serviceID := chi.URLParam(r, "id")
-	svc, ok := serviceIndex[serviceID]
-	if !ok {
-		http.Error(w, "service not found", http.StatusNotFound)
+	svc, err := a.lookupPopularService(r.Context(), serviceID)
+	if err != nil {
+		if errors.Is(err, errPopularServiceNotFound) {
+			http.Error(w, "service not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
 
@@ -911,9 +1097,13 @@ func (a *App) handleListServiceReviews(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleCreateServiceReview(w http.ResponseWriter, r *http.Request) {
 	serviceID := chi.URLParam(r, "id")
-	svc, ok := serviceIndex[serviceID]
-	if !ok {
-		http.Error(w, "service not found", http.StatusNotFound)
+	svc, err := a.lookupPopularService(r.Context(), serviceID)
+	if err != nil {
+		if errors.Is(err, errPopularServiceNotFound) {
+			http.Error(w, "service not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
 

@@ -225,8 +225,8 @@ func TestHandleAgentsListReturnsAgents(t *testing.T) {
 	}
 
 	fp := &fakePool{}
-	fp.queryFn = func(_ context.Context, sql string, args ...any) (pgx.Rows, error) {
-		if strings.Contains(sql, "from agents") {
+	fp.queryFn = func(_ context.Context, query string, args ...any) (pgx.Rows, error) {
+		if strings.Contains(query, "from agents") {
 			rows := [][]any{{
 				agentID,
 				int64(42),
@@ -241,16 +241,16 @@ func TestHandleAgentsListReturnsAgents(t *testing.T) {
 			}}
 			return &sliceRows{rows: rows}, nil
 		}
-		return nil, fmt.Errorf("unexpected query: %s", sql)
+		return nil, fmt.Errorf("unexpected query: %s", query)
 	}
-	fp.queryRowFn = func(_ context.Context, sql string, args ...any) pgx.Row {
+	fp.queryRowFn = func(_ context.Context, query string, args ...any) pgx.Row {
 		switch {
-		case strings.Contains(sql, "count(1) from leases"):
+		case strings.Contains(query, "count(1) from leases"):
 			return fakeRow{values: []any{int64(2)}}
-		case strings.Contains(sql, "from check_results"):
+		case strings.Contains(query, "from check_results"):
 			return fakeRow{values: []any{sql.NullString{String: "error", Valid: true}}}
 		default:
-			return fakeRow{err: fmt.Errorf("unexpected query: %s", sql)}
+			return fakeRow{err: fmt.Errorf("unexpected query: %s", query)}
 		}
 	}
 
@@ -329,9 +329,9 @@ func TestHandleAgentGetReturnsAgent(t *testing.T) {
 	now := time.Now().Add(-5 * time.Second)
 
 	fp := &fakePool{}
-	fp.queryRowFn = func(_ context.Context, sql string, args ...any) pgx.Row {
+	fp.queryRowFn = func(_ context.Context, query string, args ...any) pgx.Row {
 		switch {
-		case strings.Contains(sql, "from agents"):
+		case strings.Contains(query, "from agents"):
 			return fakeRow{values: []any{
 				agentID,
 				int64(7),
@@ -344,12 +344,12 @@ func TestHandleAgentGetReturnsAgent(t *testing.T) {
 				3,
 				now.Add(-time.Hour),
 			}}
-		case strings.Contains(sql, "count(1) from leases"):
+		case strings.Contains(query, "count(1) from leases"):
 			return fakeRow{values: []any{int64(0)}}
-		case strings.Contains(sql, "from check_results"):
+		case strings.Contains(query, "from check_results"):
 			return fakeRow{err: pgx.ErrNoRows}
 		default:
-			return fakeRow{err: fmt.Errorf("unexpected query: %s", sql)}
+			return fakeRow{err: fmt.Errorf("unexpected query: %s", query)}
 		}
 	}
 
@@ -399,9 +399,9 @@ func TestHandleAgentPatchUpdatesSettings(t *testing.T) {
 	now := time.Now().Add(-30 * time.Second)
 
 	fp := &fakePool{}
-	fp.queryRowFn = func(_ context.Context, sql string, args ...any) pgx.Row {
+	fp.queryRowFn = func(_ context.Context, query string, args ...any) pgx.Row {
 		switch {
-		case strings.Contains(sql, "from agents"):
+		case strings.Contains(query, "from agents"):
 			return fakeRow{values: []any{
 				agentID,
 				int64(9),
@@ -414,19 +414,19 @@ func TestHandleAgentPatchUpdatesSettings(t *testing.T) {
 				5,
 				now.Add(-2 * time.Hour),
 			}}
-		case strings.Contains(sql, "count(1) from leases"):
+		case strings.Contains(query, "count(1) from leases"):
 			return fakeRow{values: []any{int64(0)}}
-		case strings.Contains(sql, "from check_results"):
+		case strings.Contains(query, "from check_results"):
 			return fakeRow{err: pgx.ErrNoRows}
 		default:
-			return fakeRow{err: fmt.Errorf("unexpected query: %s", sql)}
+			return fakeRow{err: fmt.Errorf("unexpected query: %s", query)}
 		}
 	}
 
 	var updatedName string
-	fp.execFn = func(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
-		if !strings.Contains(sql, "update agents set name") {
-			return pgconn.NewCommandTag(""), fmt.Errorf("unexpected exec: %s", sql)
+	fp.execFn = func(_ context.Context, query string, args ...any) (pgconn.CommandTag, error) {
+		if !strings.Contains(query, "update agents set name") {
+			return pgconn.NewCommandTag(""), fmt.Errorf("unexpected exec: %s", query)
 		}
 		updatedName, _ = args[0].(string)
 		return pgconn.NewCommandTag("UPDATE 1"), nil
@@ -497,9 +497,9 @@ func TestHandleAgentDeleteClearsSettings(t *testing.T) {
 	now := time.Now().Add(-time.Minute)
 
 	fp := &fakePool{}
-	fp.queryRowFn = func(_ context.Context, sql string, args ...any) pgx.Row {
-		if !strings.Contains(sql, "from agents") {
-			return fakeRow{err: fmt.Errorf("unexpected query: %s", sql)}
+	fp.queryRowFn = func(_ context.Context, query string, args ...any) pgx.Row {
+		if !strings.Contains(query, "from agents") {
+			return fakeRow{err: fmt.Errorf("unexpected query: %s", query)}
 		}
 		return fakeRow{values: []any{
 			agentID,
@@ -515,9 +515,9 @@ func TestHandleAgentDeleteClearsSettings(t *testing.T) {
 		}}
 	}
 	var execCalled bool
-	fp.execFn = func(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
-		if !strings.Contains(sql, "update agents set is_active=false") {
-			return pgconn.NewCommandTag(""), fmt.Errorf("unexpected exec: %s", sql)
+	fp.execFn = func(_ context.Context, query string, args ...any) (pgconn.CommandTag, error) {
+		if !strings.Contains(query, "update agents set is_active=false") {
+			return pgconn.NewCommandTag(""), fmt.Errorf("unexpected exec: %s", query)
 		}
 		execCalled = true
 		return pgconn.NewCommandTag("UPDATE 1"), nil
@@ -554,9 +554,9 @@ func TestHandleAgentTasksReturnsTasks(t *testing.T) {
 	now := time.Now()
 
 	fp := &fakePool{}
-	fp.queryRowFn = func(_ context.Context, sql string, args ...any) pgx.Row {
+	fp.queryRowFn = func(_ context.Context, query string, args ...any) pgx.Row {
 		switch {
-		case strings.Contains(sql, "from agents"):
+		case strings.Contains(query, "from agents"):
 			return fakeRow{values: []any{
 				agentID,
 				int64(11),
@@ -569,15 +569,15 @@ func TestHandleAgentTasksReturnsTasks(t *testing.T) {
 				3,
 				now.Add(-3 * time.Hour),
 			}}
-		case strings.Contains(sql, "count(1) from check_results"):
+		case strings.Contains(query, "count(1) from check_results"):
 			return fakeRow{values: []any{int64(2)}}
 		default:
-			return fakeRow{err: fmt.Errorf("unexpected query: %s", sql)}
+			return fakeRow{err: fmt.Errorf("unexpected query: %s", query)}
 		}
 	}
-	fp.queryFn = func(_ context.Context, sql string, args ...any) (pgx.Rows, error) {
+	fp.queryFn = func(_ context.Context, query string, args ...any) (pgx.Rows, error) {
 		switch {
-		case strings.Contains(sql, "from leases"):
+		case strings.Contains(query, "from leases"):
 			rows := [][]any{{
 				uuid.New(),
 				uuid.New(),
@@ -588,7 +588,7 @@ func TestHandleAgentTasksReturnsTasks(t *testing.T) {
 				sql.NullTime{Time: now.Add(-3 * time.Minute), Valid: true},
 			}}
 			return &sliceRows{rows: rows}, nil
-		case strings.Contains(sql, "from check_results"):
+		case strings.Contains(query, "from check_results"):
 			rows := [][]any{
 				{
 					uuid.New(),
@@ -617,7 +617,7 @@ func TestHandleAgentTasksReturnsTasks(t *testing.T) {
 			}
 			return &sliceRows{rows: rows}, nil
 		default:
-			return nil, fmt.Errorf("unexpected query: %s", sql)
+			return nil, fmt.Errorf("unexpected query: %s", query)
 		}
 	}
 
@@ -696,24 +696,24 @@ func TestHandleQuickCheckCreateQueuesTasks(t *testing.T) {
 
 	checkID := uuid.New()
 	fp := &fakePool{}
-	fp.queryRowFn = func(_ context.Context, sql string, args ...any) pgx.Row {
-		if !strings.Contains(sql, "insert into checks") {
-			return fakeRow{err: fmt.Errorf("unexpected query: %s", sql)}
+	fp.queryRowFn = func(_ context.Context, query string, args ...any) pgx.Row {
+		if !strings.Contains(query, "insert into checks") {
+			return fakeRow{err: fmt.Errorf("unexpected query: %s", query)}
 		}
 		return fakeRow{values: []any{checkID}}
 	}
 	var quickInserted bool
-	fp.execFn = func(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	fp.execFn = func(_ context.Context, query string, args ...any) (pgconn.CommandTag, error) {
 		switch {
-		case strings.Contains(sql, "insert into quick_checks"):
+		case strings.Contains(query, "insert into quick_checks"):
 			quickInserted = true
 			return pgconn.NewCommandTag("INSERT 1"), nil
-		case strings.Contains(sql, "update checks set started_at"):
+		case strings.Contains(query, "update checks set started_at"):
 			return pgconn.NewCommandTag("UPDATE 1"), nil
-		case strings.Contains(sql, "update checks set finished_at"):
+		case strings.Contains(query, "update checks set finished_at"):
 			return pgconn.NewCommandTag("UPDATE 1"), nil
 		default:
-			return pgconn.NewCommandTag(""), fmt.Errorf("unexpected exec: %s", sql)
+			return pgconn.NewCommandTag(""), fmt.Errorf("unexpected exec: %s", query)
 		}
 	}
 
@@ -805,20 +805,20 @@ func TestHandleQuickCheckCreateRateLimit(t *testing.T) {
 	checkID := uuid.New()
 	fp := &fakePool{}
 	var insertCount int
-	fp.queryRowFn = func(_ context.Context, sql string, args ...any) pgx.Row {
-		if !strings.Contains(sql, "insert into checks") {
-			return fakeRow{err: fmt.Errorf("unexpected query: %s", sql)}
+	fp.queryRowFn = func(_ context.Context, query string, args ...any) pgx.Row {
+		if !strings.Contains(query, "insert into checks") {
+			return fakeRow{err: fmt.Errorf("unexpected query: %s", query)}
 		}
 		insertCount++
 		return fakeRow{values: []any{checkID}}
 	}
-	fp.execFn = func(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	fp.execFn = func(_ context.Context, query string, args ...any) (pgconn.CommandTag, error) {
 		switch {
-		case strings.Contains(sql, "insert into quick_checks"):
+		case strings.Contains(query, "insert into quick_checks"):
 			return pgconn.NewCommandTag("INSERT 1"), nil
-		case strings.Contains(sql, "update checks set started_at"):
+		case strings.Contains(query, "update checks set started_at"):
 			return pgconn.NewCommandTag("UPDATE 1"), nil
-		case strings.Contains(sql, "update checks set finished_at"):
+		case strings.Contains(query, "update checks set finished_at"):
 			return pgconn.NewCommandTag("UPDATE 1"), nil
 		default:
 			return pgconn.NewCommandTag(""), nil
@@ -880,30 +880,30 @@ func TestHandleQuickCheckCreateEmitsCachedResults(t *testing.T) {
 
 	checkID := uuid.New()
 	fp := &fakePool{}
-	fp.queryRowFn = func(_ context.Context, sql string, args ...any) pgx.Row {
+	fp.queryRowFn = func(_ context.Context, query string, args ...any) pgx.Row {
 		switch {
-		case strings.Contains(sql, "insert into checks"):
+		case strings.Contains(query, "insert into checks"):
 			return fakeRow{values: []any{checkID}}
 		default:
-			return fakeRow{err: fmt.Errorf("unexpected query: %s", sql)}
+			return fakeRow{err: fmt.Errorf("unexpected query: %s", query)}
 		}
 	}
 	var quickInserted bool
 	var resultsInserted int
-	fp.execFn = func(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	fp.execFn = func(_ context.Context, query string, args ...any) (pgconn.CommandTag, error) {
 		switch {
-		case strings.Contains(sql, "insert into quick_checks"):
+		case strings.Contains(query, "insert into quick_checks"):
 			quickInserted = true
 			return pgconn.NewCommandTag("INSERT 1"), nil
-		case strings.Contains(sql, "insert into check_results"):
+		case strings.Contains(query, "insert into check_results"):
 			resultsInserted++
 			return pgconn.NewCommandTag("INSERT 1"), nil
-		case strings.Contains(sql, "update checks set started_at"):
+		case strings.Contains(query, "update checks set started_at"):
 			return pgconn.NewCommandTag("UPDATE 1"), nil
-		case strings.Contains(sql, "update checks set finished_at"):
+		case strings.Contains(query, "update checks set finished_at"):
 			return pgconn.NewCommandTag("UPDATE 1"), nil
 		default:
-			return pgconn.NewCommandTag(""), fmt.Errorf("unexpected exec: %s", sql)
+			return pgconn.NewCommandTag(""), fmt.Errorf("unexpected exec: %s", query)
 		}
 	}
 
@@ -1087,34 +1087,34 @@ func TestHandleExtendExtendsLeaseDeadline(t *testing.T) {
 }
 
 type fakePool struct {
-	queryFn    func(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
-	queryRowFn func(ctx context.Context, sql string, args ...any) pgx.Row
-	execFn     func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	queryFn    func(ctx context.Context, query string, args ...any) (pgx.Rows, error)
+	queryRowFn func(ctx context.Context, query string, args ...any) pgx.Row
+	execFn     func(ctx context.Context, query string, args ...any) (pgconn.CommandTag, error)
 }
 
 func (f *fakePool) Close() {}
 
 func (f *fakePool) Ping(context.Context) error { return nil }
 
-func (f *fakePool) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+func (f *fakePool) Query(ctx context.Context, query string, args ...any) (pgx.Rows, error) {
 	if f.queryFn != nil {
-		return f.queryFn(ctx, sql, args...)
+		return f.queryFn(ctx, query, args...)
 	}
 	return nil, fmt.Errorf("query not implemented")
 }
 
-func (f *fakePool) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+func (f *fakePool) QueryRow(ctx context.Context, query string, args ...any) pgx.Row {
 	if f.queryRowFn != nil {
-		return f.queryRowFn(ctx, sql, args...)
+		return f.queryRowFn(ctx, query, args...)
 	}
-	return fakeRow{err: fmt.Errorf("unexpected QueryRow: %s", sql)}
+	return fakeRow{err: fmt.Errorf("unexpected QueryRow: %s", query)}
 }
 
-func (f *fakePool) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+func (f *fakePool) Exec(ctx context.Context, query string, args ...any) (pgconn.CommandTag, error) {
 	if f.execFn != nil {
-		return f.execFn(ctx, sql, args...)
+		return f.execFn(ctx, query, args...)
 	}
-	return pgconn.NewCommandTag(""), fmt.Errorf("unexpected Exec: %s", sql)
+	return pgconn.NewCommandTag(""), fmt.Errorf("unexpected Exec: %s", query)
 }
 
 type fakeRow struct {
@@ -1286,6 +1286,10 @@ func (r *sliceRows) CommandTag() pgconn.CommandTag { return pgconn.NewCommandTag
 
 func (r *sliceRows) FieldDescriptions() []pgconn.FieldDescription { return nil }
 
+func (r *sliceRows) Conn() *pgx.Conn { return nil }
+
+func (r *sliceRows) RawValues() [][]byte { return nil }
+
 func (r *sliceRows) Next() bool {
 	if r.idx < len(r.rows) {
 		r.idx++
@@ -1300,6 +1304,16 @@ func (r *sliceRows) Scan(dest ...any) error {
 	}
 	fake := fakeRow{values: r.rows[r.idx-1]}
 	return fake.Scan(dest...)
+}
+
+func (r *sliceRows) Values() ([]any, error) {
+	if r.idx == 0 || r.idx > len(r.rows) {
+		return nil, fmt.Errorf("values called with no current row")
+	}
+	row := r.rows[r.idx-1]
+	out := make([]any, len(row))
+	copy(out, row)
+	return out, nil
 }
 
 type fakeCityDB struct {

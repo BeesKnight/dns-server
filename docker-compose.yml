@@ -64,6 +64,16 @@ services:
       timeout: 3s
       retries: 10
 
+  dns-agent:
+    build: { context: ., dockerfile: ./dev/dns-agent/Dockerfile }
+    env_file:
+      - ./.env.shared
+      - ./dev/dns-agent/dns-agent.env
+      - ./dev/dns-agent/secrets.env
+    depends_on:
+      api-gw: { condition: service_healthy }
+    ports: ["2053:2053/udp"]
+
 volumes:
   pg:
   rds:

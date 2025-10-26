@@ -19,17 +19,18 @@
 
 ## .env и подготовка данных
 1. Скопируйте шаблон общих переменных (`.env.shared`) и сервисных `.env` файлов (auth/sites/jobs/api-gw). При необходимости создайте их из примеров или согласуйте значения с командой инфраструктуры.
-2. Заполните каталог `data/` файлами GeoLite2 (`GeoLite2-City.mmdb`, `GeoLite2-ASN.mmdb`). Docker-compose монтирует этот каталог в jobs-сервис; без данных часть функциональности проверок будет ограничена.【F:docker-compose.yml†L34-L52】【F:infra/roles/geoip/templates/geoip-update.sh.j2†L64-L65】
-3. Для production jobs-сервиса используйте конфигурацию через переменные окружения (`HTTP_ADDR`, `DATABASE_URL`, `REDIS_ADDR`, `REDIS_PASSWORD`, `STREAM_TASKS`, `CLAIM_BLOCK_MS`, `LEASE_TTL`, `MAX_RETRIES`, `RETRY_BACKOFF`, `DEFAULT_MAX_PARALLEL`, `CACHE_TTL`, `PUB_PREFIX`, `MAP_*`, `GEOIP_*`, `QUICK_DEDUP_TTL`, `QUICK_RATE_WINDOW`, `QUICK_RATE_PER_USER`, `QUICK_RATE_PER_IP`). Эти значения считываются на старте `services/jobs-svc` и применяются ко всем зависимостям (HTTP, Postgres, Redis, GeoIP).【F:services/jobs-svc/main.go†L33-L122】【F:group_vars/jobs_svc.yml†L13-L35】
-4. Проверьте, что переменные из таблицы [docs/overview.md](./overview.md#переменные-окружения) заданы в `.env` или через окружение shell перед запуском агента.
+2. Подготовьте конфигурацию агента: при необходимости измените дефолтные значения в `dev/dns-agent/dns-agent.env` и скопируйте `dev/dns-agent/secrets.env.example` → `dev/dns-agent/secrets.env`, заполнив `AGENT_ID`/`AGENT_AUTH_TOKEN` для bootstrap-а. Эти файлы попадают в контейнер через `env_file` секцию docker-compose.【F:dev/dns-agent/dns-agent.env†L1-L6】【F:dev/dns-agent/secrets.env.example†L1-L4】【F:docker-compose.yml†L57-L67】
+3. Заполните каталог `data/` файлами GeoLite2 (`GeoLite2-City.mmdb`, `GeoLite2-ASN.mmdb`). Docker-compose монтирует этот каталог в jobs-сервис; без данных часть функциональности проверок будет ограничена.【F:docker-compose.yml†L34-L52】【F:infra/roles/geoip/templates/geoip-update.sh.j2†L64-L65】
+4. Для production jobs-сервиса используйте конфигурацию через переменные окружения (`HTTP_ADDR`, `DATABASE_URL`, `REDIS_ADDR`, `REDIS_PASSWORD`, `STREAM_TASKS`, `CLAIM_BLOCK_MS`, `LEASE_TTL`, `MAX_RETRIES`, `RETRY_BACKOFF`, `DEFAULT_MAX_PARALLEL`, `CACHE_TTL`, `PUB_PREFIX`, `MAP_*`, `GEOIP_*`, `QUICK_DEDUP_TTL`, `QUICK_RATE_WINDOW`, `QUICK_RATE_PER_USER`, `QUICK_RATE_PER_IP`). Эти значения считываются на старте `services/jobs-svc` и применяются ко всем зависимостям (HTTP, Postgres, Redis, GeoIP).【F:services/jobs-svc/main.go†L33-L122】【F:group_vars/jobs_svc.yml†L13-L35】
+5. Проверьте, что переменные из таблицы [docs/overview.md](./overview.md#переменные-окружения) заданы в `.env` или через окружение shell перед запуском агента.
 
 ## Запуск docker-compose стенда
-1. Выполните `docker compose up --build` из корня репозитория. Это соберёт production-образ `services/jobs-svc` и остальные `dev/*` сервисы, после чего поднимет зависимости.
+1. Выполните `docker compose up --build` из корня репозитория. Это соберёт production-образ `services/jobs-svc`, остальные `dev/*` сервисы и образ `dns-agent`, после чего поднимет зависимости.
 2. Дождитесь healthchecks:
    - Postgres на порту `5432` (команда `pg_isready`).
    - Redis на порту `6379` (команда `redis-cli ping`).
    - API Gateway на порту `8088` с эндпоинтами `/livez` и `/readyz` (healthcheck curl).【F:docker-compose.yml†L3-L45】
-3. Сервисы приложений доступны на портах: auth `8080`, sites `8081`, jobs `8082`, api-gw `8088`. Убедитесь, что `.env.*` файлы содержат правильные строки подключения к Postgres/Redis; jobs-сервис проверяет готовность через `/livez` и `/readyz`, которые валидируют подключение к базе и Redis перед отдачей 200 OK.【F:services/jobs-svc/main.go†L154-L189】
+3. Сервисы приложений доступны на портах: auth `8080`, sites `8081`, jobs `8082`, api-gw `8088`, dns-agent `2053/udp`. Убедитесь, что `.env.*` файлы содержат правильные строки подключения к Postgres/Redis; jobs-сервис проверяет готовность через `/livez` и `/readyz`, которые валидируют подключение к базе и Redis перед отдачей 200 OK.【F:services/jobs-svc/main.go†L154-L189】【F:docker-compose.yml†L57-L67】
 
 ## Production jobs-сервис
 
@@ -39,14 +40,15 @@
 - В production-плейбуках Ansible переменные окружения для сервиса описаны в `group_vars/jobs_svc.yml` и `infra/inventory/group_vars/jobs_svc.yml`. Роль `services/go_app` собирает бинарь командой `go build .`, разворачивает его в `/opt/aezacheck/jobs-svc` и запускает единый процесс без дополнительных CLI-команд миграции.【F:group_vars/jobs_svc.yml†L5-L35】【F:infra/inventory/group_vars/jobs_svc.yml†L5-L35】【F:infra/roles/services/go_app/tasks/main.yml†L1-L67】
 
 ## Запуск dns_agent
-1. Экспортируйте переменные окружения (можно через `.env.agent`). Минимальный набор: `AGENT_DNS_LISTEN`, `AGENT_DNS_UPSTREAM`, `AGENT_DNS_UPSTREAM_TIMEOUT_MS`, `AGENT_MAX_INFLIGHT`, а также `AGENT_CONTROL_PLANE`, `AGENT_ID`, `AGENT_AUTH_TOKEN`, если агент должен взаимодействовать с control plane.【F:src/main.rs†L27-L132】
-2. (Опционально) Настройте размеры пулов воркеров через `AGENT_POOL_<KIND>_SIZE` и `AGENT_TRACE_RUNTIME_WORKERS`. См. раздел [Workers](./code.md#модуль-workers).【F:src/workers/mod.rs†L62-L118】
-3. Запустите агент:
+1. По умолчанию агент поднимается вместе с остальными сервисами (`docker compose up --build`). Контейнер слушает UDP-порт `2053` (проброшен на хост) и использует upstream `1.1.1.1:53`, пока вы не переопределите значение переменной `AGENT_DNS_UPSTREAM`.【F:docker-compose.yml†L57-L67】【F:dev/dns-agent/dns-agent.env†L1-L6】
+2. Чтобы переопределить настройки локально, измените `dev/dns-agent/dns-agent.env` или экспортируйте переменные перед запуском Compose, например:
    ```bash
-   cargo run --release
+   AGENT_DNS_UPSTREAM=127.0.0.1:5354 AGENT_DNS_LISTEN=0.0.0.0:15353 \
+     docker compose up dns-agent
    ```
-   или используйте собранный бинарь (`cargo build --release` → `target/release/dns_agent`). Агент выведет лог `starting DNS proxy` и начнёт слушать адрес `AGENT_DNS_LISTEN`, проксируя запросы к `AGENT_DNS_UPSTREAM` и ограничивая число одновременных запросов семафором.【F:src/main.rs†L89-L207】
-4. При подключённом control plane агент автоматически выполнит bootstrap (если заданы `AGENT_ID/AGENT_AUTH_TOKEN`), зарегистрируется и запустит фоновые тикеры heartbeats и продления лизов.【F:src/main.rs†L109-L286】 Проверяйте логи `restored control plane session`, `heartbeat failed`, `lease extension failed` для диагностики.
+   Compose объединит значения из переменных окружения, `dns-agent.env` и `secrets.env`; можно указать только нужные параметры, остальные возьмутся из файла по умолчанию.【F:dev/dns-agent/dns-agent.env†L1-L6】【F:dev/dns-agent/secrets.env.example†L1-L4】【F:docker-compose.yml†L57-L67】
+3. Контейнер автоматически использует control plane по адресу `http://api-gw:8088/v1/agents/` и ждёт его готовности через `depends_on` и healthcheck. Перед запуском убедитесь, что в `dev/dns-agent/secrets.env` заполнены `AGENT_ID`/`AGENT_AUTH_TOKEN`, если требуется bootstrap. Для отключения control plane удалите или закомментируйте соответствующие строки в `dns-agent.env` либо переопределите `AGENT_CONTROL_PLANE` на пустое значение перед запуском.
+4. При подключённом control plane агент автоматически выполнит bootstrap (если заданы `AGENT_ID/AGENT_AUTH_TOKEN`), зарегистрируется и запустит фоновые тикеры heartbeats и продления лизов. В логах ищите сообщения `restored control plane session`, `heartbeat failed`, `lease extension failed` для диагностики.【F:src/main.rs†L109-L286】
 
 ## Взаимодействие с control plane
 Контракты описаны в документации control plane. Примеры:

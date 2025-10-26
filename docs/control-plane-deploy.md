@@ -1,43 +1,46 @@
-# Control Plane Deployment Guide
+# Руководство по деплою Control Plane
 
-## Prerequisites
-- Database available and migrated using the SQL files in `infra/migrations`.
-- Environment variables
-  - `CONTROL_PLANE_BIND` (listen address, default `0.0.0.0:8080`).
-  - `CONTROL_PLANE_DATABASE_URL` (SQLite, Postgres or MySQL DSN supported by SQLx).
+## Предварительные требования
+- Доступная база данных, предварительно мигрированная скриптами из
+  `infra/migrations`.
+- Переменные окружения:
+  - `CONTROL_PLANE_BIND` (адрес прослушивания, по умолчанию `0.0.0.0:8080`).
+  - `CONTROL_PLANE_DATABASE_URL` (DSN SQLite/Postgres/MySQL, совместимый с SQLx).
+  - `CONTROL_PLANE_POOL_SIZE` (опционально, размер пула подключений; по умолчанию
+    `5`).
 
 ## Rolling restart
-1. Apply migrations (idempotent):
+1. Примените миграции (идемпотентно):
    ```bash
    sqlx migrate run --source infra/migrations --database-url "$CONTROL_PLANE_DATABASE_URL"
    ```
-2. Restart the service unit (systemd example):
+   или `cargo run --bin control_plane -- --migrate-only`.
+2. Перезапустите юнит (пример для systemd):
    ```bash
    systemctl restart dns-control-plane.service
    ```
-3. Confirm health:
-   - `GET /config` returns 200 with an `ETag` header.
-   - `POST /heartbeat` with a known agent succeeds (200) and updates
+3. Проверьте здоровье:
+   - `GET /config` должен вернуть 200 и заголовок `ETag`.
+   - `POST /heartbeat` от известного агента возвращает 200 и обновляет
      `agents.last_heartbeat`.
 
-## Dashboards & alerts
-- **Latency**: monitor P50/P95 timings per route (target: spec in
+## Дашборды и алерты
+- **Задержки:** отслеживайте P50/P95 по каждому маршруту (таргеты см. в
   `docs/control-plane-api.md`).
-- **Rate limiting**: chart `ERR_RATE_LIMITED` responses split by endpoint and
-  agent. Alert when a single agent produces >50 429s in 5 minutes.
-- **Concurrency**: visualize `concurrency_windows` as stacked graphs
-  (`limit` vs `inflight`). Alert when `limit` drops below 2 for more than 5
-  minutes.
-- **Heartbeat freshness**: track `now() - agents.last_heartbeat`. Alert when
-  >90 seconds for >5% of active agents.
+- **Ограничения скорости:** визуализируйте ответы `ERR_RATE_LIMITED` по
+  эндпоинтам и агентам. Алерт, если конкретный агент выдаёт >50 429 за 5 минут.
+- **Конкуренция:** стройте графики по `concurrency_windows` (поля `limit` и
+  `inflight`). Триггерите алерт, если `limit` держится ниже 2 более 5 минут.
+- **Свежесть heartbeat:** следите за `now() - agents.last_heartbeat`. Алерт, если
+  показатель превышает 90 секунд у >5% активных агентов.
 
-## Troubleshooting
-- **401/403 responses**: rotate agent credentials via `/register` and verify the
-  updated `auth_token` in `agents`.
-- **Missing leases**: ensure new work has been inserted into `tasks` with
-  `status = 'queued'` and check `lease_until` deadlines.
-- **Metrics backlog**: confirm the retention job is running; the background
-  `TimerService` logs warnings if cleanup fails. Manual cleanup:
+## Устранение неполадок
+- **Ответы 401/403:** обновите учётные данные агента через `/register` и проверьте
+  новый `auth_token` в таблице `agents`.
+- **Отсутствующие лизы:** убедитесь, что новые работы добавлены в `tasks` со
+  `status = 'queued'`, и проверьте дедлайны `lease_until`.
+- **Накопление метрик:** убедитесь, что задача ретенции работает; фоновый
+  `TimerService` логирует предупреждения при сбоях. Для ручной очистки:
   ```sql
   DELETE FROM agent_metrics WHERE recorded_at < datetime('now', '-30 days');
   DELETE FROM concurrency_windows WHERE expires_at < CURRENT_TIMESTAMP;

@@ -1,105 +1,108 @@
-# DNS Agent Control Plane
+# Контрольная плоскость DNS-агентов
 
-This repository now ships a full HTTP control plane for DNS agents. The server
-exposes the `/register`, `/heartbeat`, `/claim`, `/extend`, `/report`, `/metrics`
-and `/config` endpoints described in [`docs/control-plane-api.md`](docs/control-plane-api.md)
-and persists agent state, leases and metrics in a SQL database.
+Репозиторий предоставляет полный HTTP control plane для DNS-агентов. Сервер
+отдаёт эндпоинты `/register`, `/heartbeat`, `/claim`, `/extend`, `/report`,
+`/metrics` и `/config`, описанные в документе
+[`docs/control-plane-api.md`](docs/control-plane-api.md), и хранит состояние
+агентов, лизы и метрики в SQL-базе данных.
 
-## Quick start
+## Быстрый старт
 
-1. **Install dependencies**: the control plane uses SQLite by default. No extra
-   services are required for local development.
-2. **Run migrations**:
+1. **Зависимости.** Для локальной разработки достаточно установленного Rust и
+   SQLite (используется по умолчанию). Дополнительные сервисы не требуются.
+2. **Миграции.** Примените SQL-скрипты из [`infra/migrations`](infra/migrations)
+   через `sqlx` или встроенный рантайм:
    ```bash
-   cargo run --bin control_plane -- --migrate-only # see docs/control-plane-deploy.md
+   cargo run --bin control_plane -- --migrate-only # см. docs/control-plane-deploy.md
    ```
-   or apply the SQL scripts in [`infra/migrations`](infra/migrations) manually.
-3. **Start the server**:
+   либо выполните SQL-скрипты вручную.
+3. **Запуск сервера.**
    ```bash
    CONTROL_PLANE_BIND=0.0.0.0:8080 \
    CONTROL_PLANE_DATABASE_URL=sqlite://control-plane.db \
    cargo run --bin control_plane
    ```
-4. **Call the API** using any HTTP client. The integration tests in
-   [`tests/control_plane_api.rs`](tests/control_plane_api.rs) demonstrate both
-   happy-path and rate-limit scenarios.
+4. **Работа с API.** Используйте любой HTTP-клиент. Интеграционные тесты
+   [`tests/control_plane_api.rs`](tests/control_plane_api.rs) демонстрируют как
+   позитивные сценарии, так и кейсы с ограничением скорости.
 
-By default the server writes structured traces via `tower-http` and stores data
-under the SQLite file configured by `CONTROL_PLANE_DATABASE_URL`.
+По умолчанию сервер пишет структурированные трейсы через `tower-http` и хранит
+данные в SQLite-файле, указанном в `CONTROL_PLANE_DATABASE_URL`.
 
-## Database schema
+## Схема базы данных
 
-The schema is defined in [`infra/migrations`](infra/migrations):
+Схема описана в [`infra/migrations`](infra/migrations):
 
-- `agents` — registered agents, authentication tokens, heartbeat deadlines.
-- `tasks`/`leases` — queued work and active leases with TTL-indexed deadlines.
-- `agent_metrics` — accepted metric envelopes (retained for 30 days).
-- `agent_configs` — signed configuration bundles served via `/config`.
-- `concurrency_windows` — persisted snapshots of dispatcher concurrency state
-  (used by `ConcurrencyController::with_persistence`).
+- `agents` — зарегистрированные агенты, их токены и дедлайны heartbeat-ов.
+- `tasks`/`leases` — очередь работ и активные лизы с TTL-дедлайнами.
+- `agent_metrics` — принятые метрики (хранятся 30 дней).
+- `agent_configs` — подписанные конфигурации, отдаваемые через `/config`.
+- `concurrency_windows` — снимки состояния диспетчера конкуренции, используемые
+  `ConcurrencyController::with_persistence`.
 
-`AgentStore` wraps a `SqlitePool` (any SQLx-compatible database can be used) and
-provides `register`, `heartbeat`, `claim`, `extend`, `report`, `ingest_metrics`
-and `latest_config` helpers. Background retention jobs purge stale metrics and
-expired concurrency windows via the shared `TimerService`.
+`AgentStore` оборачивает `SqlitePool` (можно использовать любую базу,
+поддерживаемую SQLx) и предоставляет помощники `register`, `heartbeat`, `claim`,
+`extend`, `report`, `ingest_metrics` и `latest_config`. Фоновые задачи очищают
+устаревшие метрики и просроченные окна конкуренции через общий `TimerService`.
 
-## Authentication & rate limiting
+## Аутентификация и ограничение скорости
 
-All endpoints except `/register` require the `X-Agent-Id` and `X-Agent-Token`
-headers. The middleware in `runtime::middleware` validates credentials using
-`AgentStore::authenticate_credentials`, attaches the agent identity to the
-request, and enforces per-endpoint quotas:
+Все эндпоинты, кроме `/register`, требуют заголовков `X-Agent-Id` и
+`X-Agent-Token`. Прослойка `runtime::middleware` проверяет учётные данные через
+`AgentStore::authenticate_credentials`, прикрепляет идентификатор агента к
+запросу и применяет квоты для каждого эндпоинта:
 
-| Endpoint   | Limit                                     |
-|------------|-------------------------------------------|
-| `/register`| 1 request per hostname or IP every 10 min |
-| `/heartbeat` | 6/minute with burst 3                   |
-| `/claim`   | 12/minute with burst 6                    |
-| `/extend`  | 30/minute with burst 10                   |
-| `/report`  | 12/minute with burst 6                    |
-| `/metrics` | 60/minute with burst 10                   |
-| `/config`  | 6/hour with burst 2                       |
+| Эндпоинт    | Лимит                                      |
+|-------------|--------------------------------------------|
+| `/register` | 1 запрос на hostname или IP раз в 10 минут |
+| `/heartbeat` | 6 в минуту (burst 3)                      |
+| `/claim`    | 12 в минуту (burst 6)                      |
+| `/extend`   | 30 в минуту (burst 10)                     |
+| `/report`   | 12 в минуту (burst 6)                      |
+| `/metrics`  | 60 в минуту (burst 10)                     |
+| `/config`   | 6 в час (burst 2)                          |
 
-429 responses include `ERR_RATE_LIMITED` and a `Retry-After` header. Authentication
-failures surface `ERR_UNAUTHORIZED`/`ERR_FORBIDDEN` JSON envelopes consistent with
-the published API contract.
+Ответы 429 содержат `ERR_RATE_LIMITED` и заголовок `Retry-After`.
+Ошибки аутентификации возвращают JSON-обёртки `ERR_UNAUTHORIZED`/`ERR_FORBIDDEN`
+в соответствии с контрактом API.
 
-## Observability & monitoring
+## Наблюдаемость и мониторинг
 
-- **Tracing**: HTTP requests emit spans with method/URI metadata via
+- **Трейсинг.** HTTP-запросы публикуют спаны с методами и URI через
   `runtime::telemetry::http_trace_layer`.
-- **Metrics**: `ConcurrencyController::with_persistence` writes snapshots into
-  `concurrency_windows`, enabling dashboards around queue depth and available
-  window sizes. Timer lag metrics continue to be published via the existing
-  `metrics` crate counters.
-- **Recommended alerts**:
-  - Heartbeat freshness (`agents.last_heartbeat` lag > 2× timeout).
-  - Excessive rate-limit events (`ERR_RATE_LIMITED` count per agent).
-  - Concurrency window collapse (`concurrency_windows.limit` below 1).
+- **Метрики.** `ConcurrencyController::with_persistence` записывает снимки в
+  `concurrency_windows`, что позволяет строить дашборды по глубине очереди и
+  доступным окнам. Метрики задержек таймеров публикуются через counters из
+  `metrics`.
+- **Рекомендуемые алерты:**
+  - Свежесть heartbeat (`agents.last_heartbeat` > 2× таймаута).
+  - Чрезмерные события `ERR_RATE_LIMITED` (по агентам).
+  - Коллапс окон конкуренции (`concurrency_windows.limit < 1`).
 
-The new `/metrics` endpoint accepts aggregated counters/gauges which can feed
-into Prometheus or any metrics pipeline using the stored JSON envelopes.
+Эндпоинт `/metrics` принимает агрегированные счётчики и gauge-метрики, которые
+можно перенаправить в Prometheus или другую систему, используя сохранённые JSON.
 
-## Testing & CI
+## Тестирование и CI
 
-Integration and smoke tests live in `tests/`:
+Интеграционные и смоук-тесты лежат в каталоге `tests/`:
 
-- `control_plane_api.rs` exercises the API (positive/negative flows and a simple
-  throughput benchmark).
-- Additional unit tests cover agent registration and concurrency persistence.
+- `control_plane_api.rs` проверяет API (позитивные/негативные сценарии и простой
+  тест пропускной способности).
+- Дополнительные модульные тесты покрывают регистрацию агентов и персистентность
+  конкуренции.
 
-Run the full suite with:
+Полный набор запускается командой:
 
 ```bash
 make test
 ```
 
-The `ci` target hooks into the same command to simplify pipeline integration.
+Цель `ci` повторяет тот же шаг для интеграции с пайплайнами.
 
-## Deployment
+## Деплоймент
 
-Operational runbooks and playbooks remain under `docs/` and `infra/`. A dedicated
-control plane deploy guide is provided in
-[`docs/control-plane-deploy.md`](docs/control-plane-deploy.md) outlining service
-restart procedures, health checks and suggested dashboard widgets for the new
-endpoints.
+Руководства по эксплуатации и плейбуки расположены в `docs/` и `infra/`.
+Отдельный гид по развёртыванию control plane см. в
+[`docs/control-plane-deploy.md`](docs/control-plane-deploy.md) — в нём описаны
+перезапуск службы, проверки здоровья и рекомендуемые дашборды для новых
+эндпоинтов.

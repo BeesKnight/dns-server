@@ -49,9 +49,9 @@
 4. При подключённом control plane агент автоматически выполнит bootstrap (если заданы `AGENT_ID/AGENT_AUTH_TOKEN`), зарегистрируется и запустит фоновые тикеры heartbeats и продления лизов.【F:src/main.rs†L109-L286】 Проверяйте логи `restored control plane session`, `heartbeat failed`, `lease extension failed` для диагностики.
 
 ## Взаимодействие с control plane
-Контракты описаны в `README.md`. Примеры:
-- Claim response (лиз) с `kind` и `spec` (DNS/HTTP/TCP/PING/TRACE).【F:README.md†L1-L28】
-- Report request с массивами `completed` и `cancelled`, содержащими `observations` (значение + единица измерения).【F:README.md†L30-L41】
+Контракты описаны в документации control plane. Примеры:
+- Claim response (лиз) с `kind` и `spec` (DNS/HTTP/TCP/PING/TRACE).【F:docs/control-plane-api.md†L74-L83】
+- Report request с массивами `completed` и `cancelled`, содержащими `observations` (значение + единица измерения).【F:src/control_plane/mod.rs†L163-L169】
 
 Для ручной проверки можно отправить HTTP-запросы:
 ```bash

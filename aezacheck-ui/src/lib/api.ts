@@ -7,6 +7,15 @@ export type User = {
   current_ip?: string | null;
 };
 
+export type GeoInfo = {
+  lat: number | null;
+  lon: number | null;
+  city: string | null;
+  country: string | null;
+  asn: number | null;
+  asn_org: string | null;
+};
+
 /* ================= Helpers ================= */
 
 const API_BASE = import.meta.env.VITE_API_BASE?.replace(/\/?$/, "") ?? (import.meta.env.DEV ? "/api" : "/v1");
@@ -65,6 +74,10 @@ export const api = {
 
   me: () =>
     call<User>("v1/auth/me"),
+
+  // --- geo ---
+  geoLookup: (ip: string) =>
+    call<GeoInfo>(`v1/geo/lookup?ip=${encodeURIComponent(ip)}`),
 
   // --- checks ---
   startQuickCheck: (url: string) =>

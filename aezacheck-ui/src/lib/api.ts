@@ -338,7 +338,9 @@ const mapMapEvent = (raw: unknown): MapEvent | null => {
  * поэтому при необходимости передаём токен в query.
  */
 export function mapSSE(): EventSource {
-  const url = new URL(API_BASE + "/v1/map/events");
+  const base = API_BASE.replace(/\/?$/, "");
+  const origin = typeof window !== "undefined" ? window.location.origin : "http://localhost";
+  const url = new URL(`${base}/map/events`, origin);
   const t = localStorage.getItem("access_token");
   if (t) url.searchParams.set("access_token", t);
   return new EventSource(url.toString());
@@ -349,33 +351,33 @@ export function mapSSE(): EventSource {
 export const api = {
   // --- auth ---
   login: (email: string, password: string) =>
-    call<{ access_token: string; expires_in: number; user: User }>("v1/auth/login", {
+    call<{ access_token: string; expires_in: number; user: User }>("auth/login", {
       method: "POST",
       body: { email, password },
     }),
 
   register: (email: string, password: string) =>
-    call<{ access_token: string; expires_in: number; user: User }>("v1/auth/register", {
+    call<{ access_token: string; expires_in: number; user: User }>("auth/register", {
       method: "POST",
       body: { email, password },
     }),
 
   me: () =>
-    call<User>("v1/auth/me"),
+    call<User>("auth/me"),
 
   // --- geo ---
   geoLookup: (ip: string) =>
-    call<GeoInfo>(`v1/geo/lookup?ip=${encodeURIComponent(ip)}`),
+    call<GeoInfo>(`geo/lookup?ip=${encodeURIComponent(ip)}`),
 
   // --- services ---
   listServices: async () => {
-    const data = await call<{ items: RawServiceSummary[] }>("v1/services");
+    const data = await call<{ items: RawServiceSummary[] }>("services");
     return data.items.map(mapServiceSummary);
   },
 
   listServiceReviews: async (serviceId: string) => {
     const data = await call<RawServiceReviewList>(
-      `v1/services/${encodeURIComponent(serviceId)}/reviews`
+      `services/${encodeURIComponent(serviceId)}/reviews`
     );
     return {
       reviews: data.reviews.map(mapServiceReview),
@@ -389,7 +391,7 @@ export const api = {
     payload: { rating: number; text: string }
   ) => {
     const data = await call<RawServiceReviewCreate>(
-      `v1/services/${encodeURIComponent(serviceId)}/reviews`,
+      `services/${encodeURIComponent(serviceId)}/reviews`,
       {
         method: "POST",
         body: payload,
@@ -403,29 +405,29 @@ export const api = {
   },
 
   // --- profile ---
-  profile: () => call<UserProfile>("v1/profile"),
+  profile: () => call<UserProfile>("profile"),
 
   getProfile: async () => {
-    const data = await call<RawUserProfile>("v1/profile");
+    const data = await call<RawUserProfile>("profile");
     return mapProfile(data);
   },
 
   // --- checks ---
   startQuickCheck: (url: string) =>
-    call<{ check_id: string }>("v1/jobs/checks", {
+    call<{ check_id: string }>("jobs/checks", {
       method: "POST",
       body: { url, template: "quick" },
     }),
 
   startCheck: (url: string, kinds: string[], opts?: { dns_server?: string }) =>
-    call<{ check_id: string }>("v1/jobs/checks", {
+    call<{ check_id: string }>("jobs/checks", {
       method: "POST",
       body: { url, kinds, ...opts },
     }),
 
   getCheckResults: async (checkId: string) => {
     const data = await call<RawCheckResults>(
-      `v1/jobs/checks/${encodeURIComponent(checkId)}`
+      `jobs/checks/${encodeURIComponent(checkId)}`
     );
     return mapCheckResults(data);
   },
@@ -435,7 +437,7 @@ export const api = {
     const search = buildQuery({ minutes: params.minutes, limit: params.limit });
     const query = search.toString();
     const suffix = query ? `?${query}` : "";
-    const data = await call<{ items: RawMapAgent[] }>(`v1/map/agents${suffix}`);
+    const data = await call<{ items: RawMapAgent[] }>(`map/agents${suffix}`);
     return Array.isArray(data.items) ? data.items.map(mapMapAgent) : [];
   },
 
@@ -450,7 +452,7 @@ export const api = {
     const query = search.toString();
     const suffix = query ? `?${query}` : "";
     const data = await call<{ items: unknown[]; next_cursor?: string }>(
-      `v1/map/snapshot${suffix}`
+      `map/snapshot${suffix}`
     );
     const items = Array.isArray(data.items)
       ? data.items

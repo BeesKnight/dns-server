@@ -25,7 +25,7 @@
 5. Проверьте, что переменные из таблицы [docs/overview.md](./overview.md#переменные-окружения) заданы в `.env` или через окружение shell перед запуском агента.
 
 ## Запуск docker-compose стенда
-1. Выполните `docker compose up --build` из корня репозитория. Это соберёт production-образ `services/jobs-svc`, остальные `dev/*` сервисы и образ `dns-agent`, после чего поднимет зависимости.
+1. Выполните `docker compose up --build` из корня репозитория. Это соберёт production-образ `services/jobs-svc`, остальные `dev/*` сервисы и образ `dns-agent`, после чего поднимет зависимости. При необходимости задайте переменную окружения `DOCKER_LIBRARY_REGISTRY` (например, `public.ecr.aws/docker/library` или URL корпоративного зеркала), чтобы Dockerfiles использовали доступный вам реестр базовых образов вместо `docker.io`.
 2. Дождитесь healthchecks:
    - Postgres на порту `5432` (команда `pg_isready`).
    - Redis на порту `6379` (команда `redis-cli ping`).

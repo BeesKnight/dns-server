@@ -26,14 +26,22 @@ services:
       retries: 40
 
   auth-svc:
-    build: { context: ., dockerfile: ./dev/auth-svc/Dockerfile }
+    build:
+      context: .
+      dockerfile: ./dev/auth-svc/Dockerfile
+      args:
+        DOCKER_LIBRARY_REGISTRY: ${DOCKER_LIBRARY_REGISTRY:-public.ecr.aws/docker/library}
     env_file: [ ./.env.shared, ./.env.auth ]
     depends_on:
       postgres: { condition: service_healthy }
     ports: ["8080:8080"]
 
   sites-svc:
-    build: { context: ., dockerfile: ./dev/sites-svc/Dockerfile }
+    build:
+      context: .
+      dockerfile: ./dev/sites-svc/Dockerfile
+      args:
+        DOCKER_LIBRARY_REGISTRY: ${DOCKER_LIBRARY_REGISTRY:-public.ecr.aws/docker/library}
     env_file: [ ./.env.shared, ./.env.sites ]
     depends_on:
       postgres: { condition: service_healthy }
@@ -41,7 +49,11 @@ services:
     ports: ["8081:8081"]
 
   jobs-svc:
-    build: { context: ., dockerfile: ./services/jobs-svc/Dockerfile }
+    build:
+      context: .
+      dockerfile: ./services/jobs-svc/Dockerfile
+      args:
+        DOCKER_LIBRARY_REGISTRY: ${DOCKER_LIBRARY_REGISTRY:-public.ecr.aws/docker/library}
     env_file: [ ./.env.shared, ./.env.jobs ]
     depends_on:
       postgres: { condition: service_healthy }
@@ -51,7 +63,11 @@ services:
     ports: ["8082:8082"]
 
   api-gw:
-    build: { context: ., dockerfile: ./dev/api-gw/Dockerfile }
+    build:
+      context: .
+      dockerfile: ./dev/api-gw/Dockerfile
+      args:
+        DOCKER_LIBRARY_REGISTRY: ${DOCKER_LIBRARY_REGISTRY:-public.ecr.aws/docker/library}
     env_file: [ ./.env.shared, ./.env.gateway ]
     depends_on:
       auth-svc:  { condition: service_started }
@@ -65,7 +81,11 @@ services:
       retries: 10
 
   dns-agent:
-    build: { context: ., dockerfile: ./dev/dns-agent/Dockerfile }
+    build:
+      context: .
+      dockerfile: ./dev/dns-agent/Dockerfile
+      args:
+        DOCKER_LIBRARY_REGISTRY: ${DOCKER_LIBRARY_REGISTRY:-public.ecr.aws/docker/library}
     env_file:
       - ./.env.shared
       - ./dev/dns-agent/dns-agent.env

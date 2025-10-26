@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Globe2, ChevronUp, ChevronDown } from "lucide-react";
-import { api, type CheckResult } from "../lib/api";
+import { api, type CheckGeoDetails, type CheckResult, type GeoInfo } from "../lib/api";
 import { useConnection } from "../store/connection";
 
 type Props = {
@@ -21,9 +21,42 @@ type DnsRecordGroup = {
   records: DnsRecord[];
 };
 
+type GeoCardInfo = {
+  key: string;
+  title: string;
+  ip?: string | null;
+  host?: string | null;
+  provider: string;
+  location: string;
+  meta?: string[];
+};
+
+const MAX_TARGET_GEO_CARDS = 2;
 const TERMINAL_STATUSES = new Set(["done", "error", "cancelled", "unknown"]);
 const POLL_INTERVAL_MS = 2500;
 const POLL_ERROR_INTERVAL_MS = 5000;
+
+const formatGeoProvider = (geo?: GeoInfo | null): string => {
+  if (!geo) return "—";
+  const org = typeof geo.asn_org === "string" ? geo.asn_org.trim() : "";
+  if (org) return org;
+  if (typeof geo.asn === "number" && Number.isFinite(geo.asn)) {
+    return `AS${geo.asn}`;
+  }
+  return "—";
+};
+
+const formatGeoLocation = (geo?: GeoInfo | null): string => {
+  if (!geo) return "—";
+  const parts: string[] = [];
+  const city = typeof geo.city === "string" ? geo.city.trim() : "";
+  if (city) parts.push(city);
+  const country =
+    (typeof geo.country_name === "string" ? geo.country_name.trim() : "") ||
+    (typeof geo.country === "string" ? geo.country.trim() : "");
+  if (country) parts.push(country);
+  return parts.length > 0 ? parts.join(", ") : "—";
+};
 
 const formatStatus = (status: string | null): string => {
   if (!status) return "—";
@@ -173,8 +206,53 @@ export default function CheckSheet({ open, onOpenChange }: Props) {
   const [resultsError, setResultsError] = useState<string | null>(null);
   const [polling, setPolling] = useState(false);
   const [lastCheckUrl, setLastCheckUrl] = useState<string | null>(null);
+  const [geoDetails, setGeoDetails] = useState<CheckGeoDetails | null>(null);
+  const [geoDetailsError, setGeoDetailsError] = useState<string | null>(null);
+  const [geoDetailsLoading, setGeoDetailsLoading] = useState(false);
+  const geoRequestIdRef = useRef(0);
 
   const { ip, geo, loading: connectionLoading, error: connectionError } = useConnection();
+
+  const loadGeoDetails = useCallback(
+    (checkId: string) => {
+      geoRequestIdRef.current += 1;
+      const requestId = geoRequestIdRef.current;
+      setGeoDetailsLoading(true);
+      setGeoDetailsError(null);
+      api
+        .getCheckGeo(checkId)
+        .then((data) => {
+          if (geoRequestIdRef.current !== requestId) return;
+          setGeoDetails(data);
+        })
+        .catch((error: unknown) => {
+          if (geoRequestIdRef.current !== requestId) return;
+          const message =
+            error instanceof Error ? error.message : "Не удалось загрузить геоданные";
+          setGeoDetailsError(message);
+          setGeoDetails(null);
+        })
+        .finally(() => {
+          if (geoRequestIdRef.current !== requestId) return;
+          setGeoDetailsLoading(false);
+        });
+    },
+    []
+  );
+
+  useEffect(() => {
+    if (!activeCheckId) {
+      geoRequestIdRef.current += 1;
+      setGeoDetails(null);
+      setGeoDetailsError(null);
+      setGeoDetailsLoading(false);
+      return;
+    }
+
+    setGeoDetails(null);
+    setGeoDetailsError(null);
+    loadGeoDetails(activeCheckId);
+  }, [activeCheckId, loadGeoDetails]);
 
   useEffect(() => {
     if (!activeCheckId) return;
@@ -224,6 +302,12 @@ export default function CheckSheet({ open, onOpenChange }: Props) {
     };
   }, [activeCheckId]);
 
+  useEffect(() => {
+    if (!activeCheckId) return;
+    if (results.length === 0) return;
+    loadGeoDetails(activeCheckId);
+  }, [activeCheckId, results.length, loadGeoDetails]);
+
   const dnsRecords = useMemo<DnsRecord[]>(() => {
     if (results.length === 0) return [];
     const collected: DnsRecord[] = [];
@@ -233,6 +317,64 @@ export default function CheckSheet({ open, onOpenChange }: Props) {
     }
     return collected;
   }, [results]);
+
+  const geoCards = useMemo<GeoCardInfo[]>(() => {
+    if (!geoDetails) return [];
+    const cards: GeoCardInfo[] = [];
+
+    if (geoDetails.source) {
+      const meta =
+        geoDetails.source.kind && geoDetails.source.kind.trim() !== ""
+          ? [geoDetails.source.kind.trim().toUpperCase()]
+          : undefined;
+      cards.push({
+        key: "source",
+        title: "Источник запроса",
+        ip: geoDetails.source.ip ?? null,
+        host: geoDetails.source.host ?? null,
+        provider: formatGeoProvider(geoDetails.source.geo),
+        location: formatGeoLocation(geoDetails.source.geo),
+        meta,
+      });
+    }
+
+    if (geoDetails.agent) {
+      const meta: string[] = [];
+      if (geoDetails.agent.id) meta.push(`ID ${geoDetails.agent.id}`);
+      if (geoDetails.agent.version) meta.push(`v${geoDetails.agent.version}`);
+      cards.push({
+        key: "agent",
+        title: "Исполнитель (агент)",
+        ip: geoDetails.agent.ip ?? null,
+        provider: formatGeoProvider(geoDetails.agent.geo),
+        location: formatGeoLocation(geoDetails.agent.geo),
+        meta: meta.length > 0 ? meta : undefined,
+      });
+    }
+
+    const targets = Array.isArray(geoDetails.targets)
+      ? geoDetails.targets.slice(0, MAX_TARGET_GEO_CARDS)
+      : [];
+    targets.forEach((target, index) => {
+      const meta: string[] = [];
+      if (target.kind) meta.push(target.kind.toUpperCase());
+      cards.push({
+        key: `target-${index}`,
+        title: geoDetails.targets.length > 1 ? `Цель ${index + 1}` : "Цель",
+        ip: target.ip ?? null,
+        host: target.host ?? null,
+        provider: formatGeoProvider(target.geo),
+        location: formatGeoLocation(target.geo),
+        meta: meta.length > 0 ? meta : undefined,
+      });
+    });
+
+    return cards;
+  }, [geoDetails]);
+
+  const hiddenTargetsCount = geoDetails
+    ? Math.max((geoDetails.targets?.length ?? 0) - MAX_TARGET_GEO_CARDS, 0)
+    : 0;
 
   const dnsGroups = useMemo<DnsRecordGroup[]>(() => {
     if (dnsRecords.length === 0) return [];
@@ -254,18 +396,24 @@ export default function CheckSheet({ open, onOpenChange }: Props) {
     ? TERMINAL_STATUSES.has(normalizedStatus)
     : false;
 
+  useEffect(() => {
+    if (!activeCheckId) return;
+    if (!isTerminal) return;
+    loadGeoDetails(activeCheckId);
+  }, [activeCheckId, isTerminal, loadGeoDetails]);
+
   const ipText = connectionLoading ? "Загрузка..." : ip ?? "—";
   const providerText = connectionLoading
     ? "Загрузка..."
     : geo
-      ? geo.asn_org || (geo.asn ? `AS${geo.asn}` : "—")
+      ? formatGeoProvider(geo)
       : connectionError
         ? "Недоступно"
         : "—";
   const locationText = connectionLoading
     ? "Загрузка..."
     : geo
-      ? [geo.city, geo.country].filter(Boolean).join(", ") || "—"
+      ? formatGeoLocation(geo)
       : connectionError
         ? "Недоступно"
         : "—";
@@ -286,6 +434,10 @@ export default function CheckSheet({ open, onOpenChange }: Props) {
       setDnsServer(null);
       setCheckStatus("queued");
       setActiveCheckId(checkId);
+      geoRequestIdRef.current += 1;
+      setGeoDetails(null);
+      setGeoDetailsError(null);
+      setGeoDetailsLoading(false);
       // тут можно показать тост/уведомление «Проверка запущена»
     } catch (error: unknown) {
       const message =
@@ -436,6 +588,71 @@ export default function CheckSheet({ open, onOpenChange }: Props) {
                           )}
                         </div>
                       </div>
+
+                      {(geoDetailsLoading || geoDetailsError || geoCards.length > 0) && (
+                        <div className="mt-4">
+                          <div className="text-xs uppercase tracking-wide text-slate-400">
+                            Сетевые данные
+                          </div>
+                          {geoDetailsLoading && (
+                            <div className="mt-2 text-xs text-slate-500">Геоданные загружаются…</div>
+                          )}
+                          {geoDetailsError && (
+                            <div className="mt-3 rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-xs text-yellow-100">
+                              {geoDetailsError}
+                            </div>
+                          )}
+                          {geoCards.length > 0 ? (
+                            <div className="mt-3 grid gap-3 md:grid-cols-3">
+                              {geoCards.map((card) => (
+                                <div
+                                  key={card.key}
+                                  className="rounded-xl border border-white/10 bg-slate-800/40 p-3"
+                                >
+                                  <div className="text-xs uppercase text-slate-400">{card.title}</div>
+                                  {card.meta && card.meta.length > 0 && (
+                                    <div className="mt-1 text-[11px] text-slate-500">
+                                      {card.meta.join(" · ")}
+                                    </div>
+                                  )}
+                                  <div className="mt-2 break-words font-mono text-sm text-slate-100">
+                                    {card.ip ?? "—"}
+                                  </div>
+                                  {card.host && (
+                                    <div className="mt-1 break-words text-xs text-slate-400">
+                                      {card.host}
+                                    </div>
+                                  )}
+                                  <div className="mt-3 text-[11px] uppercase text-slate-500">
+                                    Провайдер
+                                  </div>
+                                  <div className="text-sm text-slate-200 opacity-80">
+                                    {card.provider}
+                                  </div>
+                                  <div className="mt-2 text-[11px] uppercase text-slate-500">
+                                    Локация
+                                  </div>
+                                  <div className="text-sm text-slate-200 opacity-80">
+                                    {card.location}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            !geoDetailsLoading &&
+                            !geoDetailsError && (
+                              <div className="mt-2 text-xs text-slate-500">
+                                Геоданные появятся после первых результатов.
+                              </div>
+                            )
+                          )}
+                          {hiddenTargetsCount > 0 && (
+                            <div className="mt-2 text-[11px] text-slate-500">
+                              Дополнительно целей: {hiddenTargetsCount}
+                            </div>
+                          )}
+                        </div>
+                      )}
 
                       <div className="mt-4">
                         <div className="text-xs uppercase tracking-wide text-slate-400">

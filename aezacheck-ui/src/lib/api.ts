@@ -12,8 +12,19 @@ export type GeoInfo = {
   lon: number | null;
   city: string | null;
   country: string | null;
+  country_name: string | null;
   asn: number | null;
   asn_org: string | null;
+};
+
+type RawGeoInfo = {
+  lat?: number | string | null;
+  lon?: number | string | null;
+  city?: string | null;
+  country?: string | null;
+  country_name?: string | null;
+  asn?: number | string | null;
+  asn_org?: string | null;
 };
 
 export type ServiceSummary = {
@@ -79,11 +90,42 @@ export type CheckResults = {
   results: CheckResult[];
 };
 
+export type CheckGeoEndpoint = {
+  kind?: string | null;
+  host?: string | null;
+  ip?: string | null;
+  geo?: GeoInfo | null;
+};
+
+export type CheckGeoAgent = {
+  id?: string | null;
+  ip?: string | null;
+  name?: string | null;
+  version?: string | null;
+  geo?: GeoInfo | null;
+};
+
+export type CheckGeoTraceHop = {
+  n?: number | null;
+  ip?: string | null;
+  geo?: GeoInfo | null;
+  [key: string]: unknown;
+};
+
+export type CheckGeoDetails = {
+  checkId: string;
+  source?: CheckGeoEndpoint | null;
+  targets: CheckGeoEndpoint[];
+  agent?: CheckGeoAgent | null;
+  traceHops: CheckGeoTraceHop[];
+};
+
 export type MapGeo = {
   lat: number;
   lon: number;
   city?: string | null;
   country?: string | null;
+  country_name?: string | null;
   asn?: number | null;
   asn_org?: string | null;
 };
@@ -181,11 +223,44 @@ type RawCheckResults = {
   results: RawCheckResult[];
 };
 
+type RawCheckGeoEndpoint = {
+  kind?: string | null;
+  host?: string | null;
+  ip?: string | null;
+  geo?: RawGeoInfo | null;
+};
+
+type RawCheckGeoAgent = RawCheckGeoEndpoint & {
+  id?: string | null;
+  name?: string | null;
+  version?: string | null;
+};
+
+type RawCheckGeoTraceHop = {
+  n?: number | string | null;
+  ip?: string | null;
+  geo?: RawGeoInfo | null;
+  [key: string]: unknown;
+};
+
+type RawCheckGeoTrace = {
+  hops?: RawCheckGeoTraceHop[] | null;
+};
+
+type RawCheckGeo = {
+  check_id: string;
+  source?: RawCheckGeoEndpoint | null;
+  targets?: RawCheckGeoEndpoint[] | null;
+  agent?: RawCheckGeoAgent | null;
+  trace?: RawCheckGeoTrace | RawCheckGeoTraceHop[] | null;
+};
+
 type RawMapGeo = {
   lat?: number | string | null;
   lon?: number | string | null;
   city?: string | null;
   country?: string | null;
+  country_name?: string | null;
   asn?: number | string | null;
   asn_org?: string | null;
 };
@@ -207,9 +282,7 @@ type RawMapEvent = {
   data?: Record<string, unknown>;
 };
 
-const API_BASE = import.meta.env.VITE_API_BASE?.replace(/\/?$/, "") ?? (import.meta.env.DEV ? "/api" : "/v1");
-
-import { buildQuery, request } from "../services";
+import { API_BASE_URL, buildQuery, request } from "../services";
 
 type CallInit = Omit<RequestInit, "body"> & {
   method?: string;
@@ -284,6 +357,136 @@ const mapCheckResults = (raw: RawCheckResults): CheckResults => ({
   results: Array.isArray(raw.results) ? raw.results.map(mapCheckResult) : [],
 });
 
+const mapCheckGeoEndpoint = (
+  item: RawCheckGeoEndpoint | null | undefined
+): CheckGeoEndpoint | null => {
+  if (!item) return null;
+  const endpoint: CheckGeoEndpoint = {};
+  let hasData = false;
+  if (typeof item.kind === "string" && item.kind.trim() !== "") {
+    endpoint.kind = item.kind.trim();
+    hasData = true;
+  }
+  if (typeof item.host === "string" && item.host.trim() !== "") {
+    endpoint.host = item.host.trim();
+    hasData = true;
+  }
+  if (typeof item.ip === "string" && item.ip.trim() !== "") {
+    endpoint.ip = item.ip.trim();
+    hasData = true;
+  }
+  const geo = mapGeoInfo(item.geo);
+  if (geo) {
+    endpoint.geo = geo;
+    hasData = true;
+  }
+  return hasData ? endpoint : null;
+};
+
+const mapCheckGeoAgent = (
+  item: RawCheckGeoAgent | null | undefined
+): CheckGeoAgent | null => {
+  if (!item) return null;
+  const agent: CheckGeoAgent = {};
+  let hasData = false;
+  if (typeof item.id === "string" && item.id.trim() !== "") {
+    agent.id = item.id.trim();
+    hasData = true;
+  }
+  if (typeof item.name === "string" && item.name.trim() !== "") {
+    agent.name = item.name.trim();
+    hasData = true;
+  }
+  if (typeof item.version === "string" && item.version.trim() !== "") {
+    agent.version = item.version.trim();
+    hasData = true;
+  }
+  if (typeof item.ip === "string" && item.ip.trim() !== "") {
+    agent.ip = item.ip.trim();
+    hasData = true;
+  }
+  const geo = mapGeoInfo(item.geo);
+  if (geo) {
+    agent.geo = geo;
+    hasData = true;
+  }
+  return hasData ? agent : null;
+};
+
+const mapCheckGeoTraceHop = (hop: RawCheckGeoTraceHop): CheckGeoTraceHop => {
+  const mapped: CheckGeoTraceHop = {};
+  if (hop.n !== null && hop.n !== undefined) {
+    const n = Number(hop.n);
+    if (Number.isFinite(n)) {
+      mapped.n = n;
+    }
+  }
+  if (typeof hop.ip === "string" && hop.ip.trim() !== "") {
+    mapped.ip = hop.ip.trim();
+  }
+  const geo = mapGeoInfo(hop.geo);
+  if (geo) {
+    mapped.geo = geo;
+  }
+  for (const [key, value] of Object.entries(hop)) {
+    if (key === "n" || key === "ip" || key === "geo") continue;
+    mapped[key] = value;
+  }
+  return mapped;
+};
+
+const normalizeTraceHops = (
+  trace: RawCheckGeoTrace | RawCheckGeoTraceHop[] | null | undefined
+): RawCheckGeoTraceHop[] => {
+  if (!trace) return [];
+  if (Array.isArray(trace)) return trace;
+  if (Array.isArray(trace.hops)) return trace.hops;
+  return [];
+};
+
+const mapCheckGeo = (raw: RawCheckGeo): CheckGeoDetails => {
+  const source = mapCheckGeoEndpoint(raw.source);
+  const targets = Array.isArray(raw.targets)
+    ? raw.targets
+        .map((item) => mapCheckGeoEndpoint(item))
+        .filter((item): item is CheckGeoEndpoint => item !== null)
+    : [];
+  const agent = mapCheckGeoAgent(raw.agent);
+  const traceHops = normalizeTraceHops(raw.trace).map(mapCheckGeoTraceHop);
+  return {
+    checkId: raw.check_id,
+    source: source ?? null,
+    targets,
+    agent: agent ?? null,
+    traceHops,
+  } satisfies CheckGeoDetails;
+};
+
+const toNumberOrNull = (value: number | string | null | undefined) => {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    const numeric = Number(trimmed);
+    return Number.isFinite(numeric) ? numeric : null;
+  }
+  const numeric = value;
+  return Number.isFinite(numeric) ? numeric : null;
+};
+
+const mapGeoInfo = (geo: RawGeoInfo | null | undefined): GeoInfo | null => {
+  if (!geo) return null;
+  return {
+    lat: toNumberOrNull(geo.lat),
+    lon: toNumberOrNull(geo.lon),
+    city: geo.city ?? null,
+    country: geo.country ?? null,
+    country_name: geo.country_name ?? null,
+    asn: toNumberOrNull(geo.asn),
+    asn_org: geo.asn_org ?? null,
+  } satisfies GeoInfo;
+};
+
 const mapMapGeo = (geo: RawMapGeo | null | undefined): MapGeo | null => {
   if (!geo) return null;
   const lat = Number(geo.lat);
@@ -296,6 +499,7 @@ const mapMapGeo = (geo: RawMapGeo | null | undefined): MapGeo | null => {
     lon,
     city: geo.city ?? null,
     country: geo.country ?? null,
+    country_name: geo.country_name ?? null,
     asn: geo.asn === null || geo.asn === undefined ? null : Number(geo.asn),
     asn_org: geo.asn_org ?? null,
   } satisfies MapGeo;
@@ -338,7 +542,9 @@ const mapMapEvent = (raw: unknown): MapEvent | null => {
  * поэтому при необходимости передаём токен в query.
  */
 export function mapSSE(): EventSource {
-  const url = new URL(API_BASE + "/v1/map/events");
+  const base = API_BASE_URL.replace(/\/?$/, "");
+  const origin = typeof window !== "undefined" ? window.location.origin : "http://localhost";
+  const url = new URL(`${base}/map/events`, origin);
   const t = localStorage.getItem("access_token");
   if (t) url.searchParams.set("access_token", t);
   return new EventSource(url.toString());
@@ -349,33 +555,37 @@ export function mapSSE(): EventSource {
 export const api = {
   // --- auth ---
   login: (email: string, password: string) =>
-    call<{ access_token: string; expires_in: number; user: User }>("v1/auth/login", {
+    call<{ access_token: string; expires_in: number; user: User }>("auth/login", {
       method: "POST",
       body: { email, password },
     }),
 
   register: (email: string, password: string) =>
-    call<{ access_token: string; expires_in: number; user: User }>("v1/auth/register", {
+    call<{ access_token: string; expires_in: number; user: User }>("auth/register", {
       method: "POST",
       body: { email, password },
     }),
 
   me: () =>
-    call<User>("v1/auth/me"),
+    call<User>("auth/me"),
 
   // --- geo ---
-  geoLookup: (ip: string) =>
-    call<GeoInfo>(`v1/geo/lookup?ip=${encodeURIComponent(ip)}`),
+  geoLookup: async (ip: string) => {
+    const response = await call<{ ip: string; geo?: RawGeoInfo | null }>(
+      `geo/lookup?ip=${encodeURIComponent(ip)}`
+    );
+    return mapGeoInfo(response.geo);
+  },
 
   // --- services ---
   listServices: async () => {
-    const data = await call<{ items: RawServiceSummary[] }>("v1/services");
+    const data = await call<{ items: RawServiceSummary[] }>("services");
     return data.items.map(mapServiceSummary);
   },
 
   listServiceReviews: async (serviceId: string) => {
     const data = await call<RawServiceReviewList>(
-      `v1/services/${encodeURIComponent(serviceId)}/reviews`
+      `services/${encodeURIComponent(serviceId)}/reviews`
     );
     return {
       reviews: data.reviews.map(mapServiceReview),
@@ -389,7 +599,7 @@ export const api = {
     payload: { rating: number; text: string }
   ) => {
     const data = await call<RawServiceReviewCreate>(
-      `v1/services/${encodeURIComponent(serviceId)}/reviews`,
+      `services/${encodeURIComponent(serviceId)}/reviews`,
       {
         method: "POST",
         body: payload,
@@ -403,31 +613,38 @@ export const api = {
   },
 
   // --- profile ---
-  profile: () => call<UserProfile>("v1/profile"),
+  profile: () => call<UserProfile>("profile"),
 
   getProfile: async () => {
-    const data = await call<RawUserProfile>("v1/profile");
+    const data = await call<RawUserProfile>("profile");
     return mapProfile(data);
   },
 
   // --- checks ---
   startQuickCheck: (url: string) =>
-    call<{ check_id: string }>("v1/jobs/checks", {
+    call<{ check_id: string }>("jobs/checks", {
       method: "POST",
       body: { url, template: "quick" },
     }),
 
   startCheck: (url: string, kinds: string[], opts?: { dns_server?: string }) =>
-    call<{ check_id: string }>("v1/jobs/checks", {
+    call<{ check_id: string }>("jobs/checks", {
       method: "POST",
       body: { url, kinds, ...opts },
     }),
 
   getCheckResults: async (checkId: string) => {
     const data = await call<RawCheckResults>(
-      `v1/jobs/checks/${encodeURIComponent(checkId)}`
+      `jobs/checks/${encodeURIComponent(checkId)}`
     );
     return mapCheckResults(data);
+  },
+
+  getCheckGeo: async (checkId: string) => {
+    const data = await call<RawCheckGeo>(
+      `checks/${encodeURIComponent(checkId)}/geo`
+    );
+    return mapCheckGeo(data);
   },
 
   // --- map ---
@@ -435,7 +652,7 @@ export const api = {
     const search = buildQuery({ minutes: params.minutes, limit: params.limit });
     const query = search.toString();
     const suffix = query ? `?${query}` : "";
-    const data = await call<{ items: RawMapAgent[] }>(`v1/map/agents${suffix}`);
+    const data = await call<{ items: RawMapAgent[] }>(`map/agents${suffix}`);
     return Array.isArray(data.items) ? data.items.map(mapMapAgent) : [];
   },
 
@@ -450,7 +667,7 @@ export const api = {
     const query = search.toString();
     const suffix = query ? `?${query}` : "";
     const data = await call<{ items: unknown[]; next_cursor?: string }>(
-      `v1/map/snapshot${suffix}`
+      `map/snapshot${suffix}`
     );
     const items = Array.isArray(data.items)
       ? data.items

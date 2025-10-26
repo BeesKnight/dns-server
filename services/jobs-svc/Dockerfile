@@ -1,4 +1,5 @@
-FROM golang:1.25-alpine AS build
+ARG DOCKER_LIBRARY_REGISTRY=public.ecr.aws/docker/library
+FROM ${DOCKER_LIBRARY_REGISTRY}/golang:1.25-alpine AS build
 WORKDIR /src
 COPY services/jobs-svc/go.mod services/jobs-svc/go.sum ./
 RUN go mod download
@@ -6,7 +7,7 @@ COPY services/jobs-svc/ ./
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=$(go env GOARCH) \
     go build -trimpath -ldflags "-s -w" -o /out/jobs-svc .
 
-FROM alpine:3.20
+FROM ${DOCKER_LIBRARY_REGISTRY}/alpine:3.20
 RUN apk add --no-cache curl ca-certificates && \
     addgroup -S app && adduser -S -G app app && \
     mkdir -p /data && chown app:app /data

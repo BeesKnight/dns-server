@@ -37,7 +37,7 @@ impl AppState {
 }
 
 pub fn router(state: AppState) -> Router {
-    let auth_ctx = AuthContext::new(state.store.clone(), ["/register"]);
+    let auth_ctx = AuthContext::new(state.store.clone(), ["/register", "/v1/agents/register"]);
 
     let heartbeat_layer = middleware::from_fn_with_state(
         RateLimitContext {
@@ -121,9 +121,13 @@ pub fn router(state: AppState) -> Router {
         .route("/config", get(config).route_layer(config_layer))
         .layer(middleware::from_fn_with_state(auth_ctx, require_auth));
 
-    Router::new()
+    let agents = Router::new()
         .route("/register", post(register))
-        .merge(protected)
+        .merge(protected);
+
+    Router::new()
+        .merge(agents.clone())
+        .nest("/v1/agents", agents)
         .with_state(state)
         .layer(http_trace_layer())
 }

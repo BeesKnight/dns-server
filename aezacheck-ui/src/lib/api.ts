@@ -16,7 +16,65 @@ export type GeoInfo = {
   asn_org: string | null;
 };
 
+export type ServiceSummary = {
+  id: string;
+  name: string;
+  url: string;
+  status: "ok" | "warn" | "bad";
+  rating: number;
+  reviews: number;
+  hourlyChecks: number[];
+};
+
+export type ServiceReview = {
+  id: string;
+  rating: number;
+  text: string;
+  createdAt: string;
+};
+
+export type ServiceReviewList = {
+  reviews: ServiceReview[];
+  reviewCount: number;
+  averageRating: number;
+};
+
+export type ServiceReviewCreateResult = {
+  review: ServiceReview;
+  reviewCount: number;
+  averageRating: number;
+};
+
 /* ================= Helpers ================= */
+
+type RawServiceSummary = {
+  id: string;
+  name: string;
+  url: string;
+  status: string;
+  rating: number;
+  reviews: number;
+  hourly_checks: number[];
+};
+
+type RawServiceReview = {
+  id: string;
+  rating: number;
+  text: string;
+  created_at: string;
+};
+
+type RawServiceReviewList = {
+  reviews: RawServiceReview[];
+  review_count: number;
+  average_rating: number;
+};
+
+type RawServiceReviewCreate = {
+  review: RawServiceReview;
+  review_count: number;
+  average_rating: number;
+};
 
 const API_BASE = import.meta.env.VITE_API_BASE?.replace(/\/?$/, "") ?? (import.meta.env.DEV ? "/api" : "/v1");
 
@@ -43,6 +101,23 @@ const call = async <T>(path: string, init: CallInit = {}): Promise<T> => {
   });
   return promise;
 };
+
+const mapServiceSummary = (item: RawServiceSummary): ServiceSummary => ({
+  id: item.id,
+  name: item.name,
+  url: item.url,
+  status: (item.status as ServiceSummary["status"]) ?? "ok",
+  rating: item.rating,
+  reviews: item.reviews,
+  hourlyChecks: Array.isArray(item.hourly_checks) ? [...item.hourly_checks] : [],
+});
+
+const mapServiceReview = (item: RawServiceReview): ServiceReview => ({
+  id: item.id,
+  rating: item.rating,
+  text: item.text,
+  createdAt: item.created_at,
+});
 
 /**
  * SSE-подключение для карты.
@@ -78,6 +153,41 @@ export const api = {
   // --- geo ---
   geoLookup: (ip: string) =>
     call<GeoInfo>(`v1/geo/lookup?ip=${encodeURIComponent(ip)}`),
+
+  // --- services ---
+  listServices: async () => {
+    const data = await call<{ items: RawServiceSummary[] }>("v1/services");
+    return data.items.map(mapServiceSummary);
+  },
+
+  listServiceReviews: async (serviceId: string) => {
+    const data = await call<RawServiceReviewList>(
+      `v1/services/${encodeURIComponent(serviceId)}/reviews`
+    );
+    return {
+      reviews: data.reviews.map(mapServiceReview),
+      reviewCount: data.review_count,
+      averageRating: data.average_rating,
+    } satisfies ServiceReviewList;
+  },
+
+  createServiceReview: async (
+    serviceId: string,
+    payload: { rating: number; text: string }
+  ) => {
+    const data = await call<RawServiceReviewCreate>(
+      `v1/services/${encodeURIComponent(serviceId)}/reviews`,
+      {
+        method: "POST",
+        body: payload,
+      }
+    );
+    return {
+      review: mapServiceReview(data.review),
+      reviewCount: data.review_count,
+      averageRating: data.average_rating,
+    } satisfies ServiceReviewCreateResult;
+  },
 
   // --- checks ---
   startQuickCheck: (url: string) =>

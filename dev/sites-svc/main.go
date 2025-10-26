@@ -8,8 +8,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log/slog"
+	"math"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/netip"
@@ -74,6 +77,123 @@ type App struct {
 	redis *redis.Client
 }
 
+/*************** Popular services catalog ***************/
+type popularService struct {
+	ID           string
+	Name         string
+	URL          string
+	Status       string
+	HourlyChecks []int
+	BaseRating   float64
+	BaseReviews  int
+}
+
+var (
+	popularServices = []popularService{
+		{
+			ID:           "yt",
+			Name:         "YouTube",
+			URL:          "https://youtube.com",
+			Status:       "ok",
+			HourlyChecks: hourlySeries("yt", 1200, 2800),
+			BaseRating:   4.7,
+			BaseReviews:  2381,
+		},
+		{
+			ID:           "gg",
+			Name:         "Google",
+			URL:          "https://google.com",
+			Status:       "ok",
+			HourlyChecks: hourlySeries("gg", 1000, 2500),
+			BaseRating:   4.7,
+			BaseReviews:  2210,
+		},
+		{
+			ID:           "tg",
+			Name:         "Telegram",
+			URL:          "https://telegram.org",
+			Status:       "ok",
+			HourlyChecks: hourlySeries("tg", 900, 2200),
+			BaseRating:   4.6,
+			BaseReviews:  1975,
+		},
+		{
+			ID:           "dc",
+			Name:         "Discord",
+			URL:          "https://discord.com",
+			Status:       "warn",
+			HourlyChecks: hourlySeries("dc", 600, 1500),
+			BaseRating:   4.2,
+			BaseReviews:  1120,
+		},
+		{
+			ID:           "gh",
+			Name:         "GitHub",
+			URL:          "https://github.com",
+			Status:       "ok",
+			HourlyChecks: hourlySeries("gh", 400, 900),
+			BaseRating:   4.9,
+			BaseReviews:  980,
+		},
+	}
+
+	serviceIndex = func() map[string]*popularService {
+		m := make(map[string]*popularService, len(popularServices))
+		for i := range popularServices {
+			svc := &popularServices[i]
+			m[svc.ID] = svc
+		}
+		return m
+	}()
+)
+
+func hourlySeries(seed string, min, max int) []int {
+	if max <= min {
+		max = min + 1
+	}
+	base := fnv.New64a()
+	_, _ = base.Write([]byte(seed))
+	src := rand.New(rand.NewSource(int64(base.Sum64())))
+	out := make([]int, 24)
+	for i := range out {
+		out[i] = min + src.Intn(max-min)
+	}
+	return out
+}
+
+func round1(f float64) float64 {
+	return math.Round(f*10) / 10
+}
+
+func aggregateRatings(svc *popularService, stats reviewStats) (float64, int) {
+	totalReviews := svc.BaseReviews + stats.Count
+	if totalReviews <= 0 {
+		return 0, 0
+	}
+	totalRating := svc.BaseRating*float64(svc.BaseReviews) + float64(stats.Sum)
+	avg := totalRating / float64(totalReviews)
+	return avg, totalReviews
+}
+
+func (a *App) fetchReviewStats(ctx context.Context, ids []string) (map[string]reviewStats, error) {
+	stats := make(map[string]reviewStats, len(ids))
+	for _, id := range ids {
+		if strings.TrimSpace(id) == "" {
+			continue
+		}
+		var cnt int64
+		var sum int64
+		if err := a.pool.QueryRow(ctx,
+			`select count(*)::bigint, coalesce(sum(rating)::bigint, 0) from service_reviews where service_id=$1`,
+			id,
+		).Scan(&cnt, &sum); err != nil {
+			return nil, err
+		}
+		stats[id] = reviewStats{Count: int(cnt), Sum: int(sum)}
+	}
+	return stats, nil
+}
+
 func main() {
 	cfg := loadConfig()
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -113,6 +233,12 @@ func main() {
 		rt.Get("/sites", app.handleListSites)
 		rt.Get("/sites/{id}", app.handleGetSite)
 		rt.Delete("/sites/{id}", app.handleDeleteSite)
+
+		rt.Route("/services", func(sr chi.Router) {
+			sr.Get("/", app.handleListServices)
+			sr.Get("/{id}/reviews", app.handleListServiceReviews)
+			sr.Post("/{id}/reviews", app.handleCreateServiceReview)
+		})
 
 		rt.Post("/sites/{id}/checks", app.handleCreateChecks) // кэш → постановка задач
 		rt.Get("/checks/{check_id}", app.handleGetCheck)      // view
@@ -195,15 +321,24 @@ func migrate(ctx context.Context, db *pgxpool.Pool) error {
 			request_ip inet
 		);`,
 		`create table if not exists check_results (
-			id uuid primary key default gen_random_uuid(),
-			check_id uuid references checks(id) on delete cascade,
-			kind text not null,              -- http|ping|tcp|dns|trace
-			status text not null,            -- ok|cancelled|fail
-			payload jsonb not null,          -- observations[]
-			metrics jsonb,
-			stream_id text,
-			created_at timestamptz not null default now()
-		);`,
+                        id uuid primary key default gen_random_uuid(),
+                        check_id uuid references checks(id) on delete cascade,
+                        kind text not null,              -- http|ping|tcp|dns|trace
+                        status text not null,            -- ok|cancelled|fail
+                        payload jsonb not null,          -- observations[]
+                        metrics jsonb,
+                        stream_id text,
+                        created_at timestamptz not null default now()
+                );`,
+		`create table if not exists service_reviews (
+                        id uuid primary key default gen_random_uuid(),
+                        service_id text not null,
+                        user_id uuid not null references users(id) on delete cascade,
+                        rating smallint not null check (rating between 1 and 5),
+                        review text not null,
+                        created_at timestamptz not null default now()
+                );`,
+		`create index if not exists idx_service_reviews_service on service_reviews(service_id);`,
 	}
 	for _, s := range stmts {
 		if _, err := db.Exec(ctx, s); err != nil {
@@ -237,6 +372,45 @@ type createSiteReq struct {
 
 type listResp[T any] struct {
 	Items []T `json:"items"`
+}
+
+type serviceListItem struct {
+	ID           string  `json:"id"`
+	Name         string  `json:"name"`
+	URL          string  `json:"url"`
+	Status       string  `json:"status"`
+	Rating       float64 `json:"rating"`
+	Reviews      int     `json:"reviews"`
+	HourlyChecks []int   `json:"hourly_checks"`
+}
+
+type serviceReviewItem struct {
+	ID        uuid.UUID `json:"id"`
+	Rating    int       `json:"rating"`
+	Text      string    `json:"text"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type serviceReviewsResp struct {
+	Reviews       []serviceReviewItem `json:"reviews"`
+	ReviewCount   int                 `json:"review_count"`
+	AverageRating float64             `json:"average_rating"`
+}
+
+type createServiceReviewReq struct {
+	Rating int    `json:"rating"`
+	Text   string `json:"text"`
+}
+
+type createServiceReviewResp struct {
+	Review        serviceReviewItem `json:"review"`
+	ReviewCount   int               `json:"review_count"`
+	AverageRating float64           `json:"average_rating"`
+}
+
+type reviewStats struct {
+	Count int
+	Sum   int
 }
 
 type createChecksReq struct {
@@ -534,6 +708,162 @@ func (a *App) handleDeleteSite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *App) handleListServices(w http.ResponseWriter, r *http.Request) {
+	ids := make([]string, 0, len(popularServices))
+	for _, svc := range popularServices {
+		ids = append(ids, svc.ID)
+	}
+
+	stats, err := a.fetchReviewStats(r.Context(), ids)
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+
+	items := make([]serviceListItem, 0, len(popularServices))
+	for _, svc := range popularServices {
+		st := stats[svc.ID]
+		avg, count := aggregateRatings(&svc, st)
+		items = append(items, serviceListItem{
+			ID:           svc.ID,
+			Name:         svc.Name,
+			URL:          svc.URL,
+			Status:       svc.Status,
+			Rating:       round1(avg),
+			Reviews:      count,
+			HourlyChecks: append([]int(nil), svc.HourlyChecks...),
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(listResp[serviceListItem]{Items: items})
+}
+
+func (a *App) handleListServiceReviews(w http.ResponseWriter, r *http.Request) {
+	serviceID := chi.URLParam(r, "id")
+	svc, ok := serviceIndex[serviceID]
+	if !ok {
+		http.Error(w, "service not found", http.StatusNotFound)
+		return
+	}
+
+	rows, err := a.pool.Query(r.Context(), `
+                select id, rating, review, created_at
+                from service_reviews
+                where service_id=$1
+                order by created_at desc
+                limit 200
+        `, serviceID)
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	reviews := make([]serviceReviewItem, 0)
+	for rows.Next() {
+		var item serviceReviewItem
+		if err := rows.Scan(&item.ID, &item.Rating, &item.Text, &item.CreatedAt); err != nil {
+			http.Error(w, "db error", http.StatusInternalServerError)
+			return
+		}
+		reviews = append(reviews, item)
+	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+
+	stats, err := a.fetchReviewStats(r.Context(), []string{serviceID})
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+	st := stats[serviceID]
+	avg, count := aggregateRatings(svc, st)
+
+	resp := serviceReviewsResp{
+		Reviews:       reviews,
+		ReviewCount:   count,
+		AverageRating: round1(avg),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func (a *App) handleCreateServiceReview(w http.ResponseWriter, r *http.Request) {
+	serviceID := chi.URLParam(r, "id")
+	svc, ok := serviceIndex[serviceID]
+	if !ok {
+		http.Error(w, "service not found", http.StatusNotFound)
+		return
+	}
+
+	userHeader := strings.TrimSpace(r.Header.Get("X-User-Id"))
+	if userHeader == "" {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	userID, err := uuid.Parse(userHeader)
+	if err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	var req createServiceReviewReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	if req.Rating < 1 || req.Rating > 5 {
+		http.Error(w, "rating must be 1..5", http.StatusBadRequest)
+		return
+	}
+	req.Text = strings.TrimSpace(req.Text)
+	if req.Text == "" {
+		http.Error(w, "text required", http.StatusBadRequest)
+		return
+	}
+	if len([]rune(req.Text)) > 4000 {
+		http.Error(w, "text too long", http.StatusBadRequest)
+		return
+	}
+
+	var reviewID uuid.UUID
+	var createdAt time.Time
+	if err := a.pool.QueryRow(r.Context(),
+		`insert into service_reviews(service_id,user_id,rating,review) values($1,$2,$3,$4) returning id,created_at`,
+		serviceID, userID, req.Rating, req.Text,
+	).Scan(&reviewID, &createdAt); err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+
+	stats, err := a.fetchReviewStats(r.Context(), []string{serviceID})
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+	st := stats[serviceID]
+	avg, count := aggregateRatings(svc, st)
+
+	resp := createServiceReviewResp{
+		Review: serviceReviewItem{
+			ID:        reviewID,
+			Rating:    req.Rating,
+			Text:      req.Text,
+			CreatedAt: createdAt,
+		},
+		ReviewCount:   count,
+		AverageRating: round1(avg),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 /*************** Кэш результатов + постановка задач ***************/

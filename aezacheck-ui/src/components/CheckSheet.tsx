@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Globe2, ChevronUp, ChevronDown } from "lucide-react";
 import { api } from "../lib/api";
+import { useConnection } from "../store/connection";
 
 type Props = {
   open: boolean;
@@ -13,14 +14,23 @@ export default function CheckSheet({ open, onOpenChange }: Props) {
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  // лёгкая инфа о текущем подключении (берём из /v1/auth/me)
-  const [ip, setIp] = useState<string | null>(null);
-  useEffect(() => {
-    api
-      .me()
-      .then((u) => setIp(u.current_ip || null))
-      .catch(() => {});
-  }, []);
+  const { ip, geo, loading: connectionLoading, error: connectionError } = useConnection();
+
+  const ipText = connectionLoading ? "Загрузка..." : ip ?? "—";
+  const providerText = connectionLoading
+    ? "Загрузка..."
+    : geo
+      ? geo.asn_org || (geo.asn ? `AS${geo.asn}` : "—")
+      : connectionError
+        ? "Недоступно"
+        : "—";
+  const locationText = connectionLoading
+    ? "Загрузка..."
+    : geo
+      ? [geo.city, geo.country].filter(Boolean).join(", ") || "—"
+      : connectionError
+        ? "Недоступно"
+        : "—";
 
   async function runQuick() {
     setErr(null);
@@ -131,16 +141,15 @@ export default function CheckSheet({ open, onOpenChange }: Props) {
                     <div className="text-slate-300 text-sm">Ваше подключение</div>
                     <div className="mt-2 text-slate-200">
                       <div className="text-xs uppercase text-slate-400">IP</div>
-                      <div className="text-sm">{ip ?? "—"}</div>
+                      <div className="text-sm">{ipText}</div>
                     </div>
-                    {/* Места под провайдера/местоположение; заполни, когда появится эндпоинт */}
                     <div className="mt-3 text-slate-200">
                       <div className="text-xs uppercase text-slate-400">Провайдер</div>
-                      <div className="text-sm opacity-70">—</div>
+                      <div className="text-sm opacity-70">{providerText}</div>
                     </div>
                     <div className="mt-3 text-slate-200">
                       <div className="text-xs uppercase text-slate-400">Локация</div>
-                      <div className="text-sm opacity-70">—</div>
+                      <div className="text-sm opacity-70">{locationText}</div>
                     </div>
                     <div className="mt-4 text-xs text-slate-400">
                       События в реальном времени: <code>check.start</code>,{" "}

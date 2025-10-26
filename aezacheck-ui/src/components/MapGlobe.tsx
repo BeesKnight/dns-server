@@ -1,11 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Globe, { GlobeMethods } from "react-globe.gl";
 import type { GlobeProps } from "react-globe.gl";
 import { feature } from "topojson-client";
-import { geoCentroid, geoArea } from "d3-geo";
 import type { FeatureCollection, Feature, MultiPolygon, Polygon } from "geojson";
 import { mapSSE } from "../lib/api";
 import type { GeometryCollection, Topology } from "topojson-specification";
+import * as THREE from "three";
 
 /* ---------- типы точек/дуг (как у вас) ---------- */
 type Arc = {
@@ -27,7 +27,17 @@ type Dot = {
   label?: string;
 };
 
-/* ---------- типы стран/подписей ---------- */
+type UserLocation = {
+  lat: number;
+  lon: number;
+  label?: string;
+};
+
+type MapGlobeProps = {
+  userLocation?: UserLocation | null;
+};
+
+/* ---------- типы стран ---------- */
 type CountryProperties = { name?: string; ADMIN?: string; name_long?: string };
 
 type CountryFeature = Feature<Polygon | MultiPolygon, CountryProperties>;
@@ -36,33 +46,38 @@ type CountriesTopology = Topology<{
   countries: GeometryCollection;
 }>;
 
-type CountryLabel = {
-  id: number;
-  name: string;
-  lat: number;
-  lng: number;
-  area: number; // географическая площадь (в стерадианах) — для оценки размера
-};
-
 /* ---------- цвета ---------- */
-const SEA_GLOW = "#63a3ff";
-const LAND_CAP = "#0f3b37"; // тёмно-зелёный
-const LAND_SIDE = "rgba(15, 23, 42, .92)";
-const LAND_STROKE = "rgba(56, 189, 248, .35)";
-const LABEL_COLOR = "rgba(226,232,240,.92)";
+const SEA_GLOW = "rgba(56,189,248,0.28)";
+const LAND_CAP = "#124f4c";
+const LAND_SIDE = "#15524f";
+const LAND_STROKE = "rgba(56,189,248,.12)";
+const MAP_BACKGROUND =
+  "radial-gradient(circle at 20% 30%, rgba(34,197,247,0.22), transparent 55%), " +
+  "radial-gradient(circle at 80% 15%, rgba(56,189,248,0.18), transparent 60%), " +
+  "linear-gradient(180deg,#050b1a 0%, #09142a 55%, #03070f 100%)";
 
-export default function MapGlobe() {
+const USER_POINT_ID = "user-location";
+
+export default function MapGlobe({ userLocation }: MapGlobeProps) {
   const globeRef = useRef<GlobeMethods | undefined>(undefined);
-  const camAltRef = useRef(1.6);         // текущая высота камеры
-  const [tick, setTick] = useState(0);   // лёгкий триггер пересчёта LOD
 
   const [polygons, setPolygons] = useState<CountryFeature[]>([]);
-  const [labelsAll, setLabelsAll] = useState<CountryLabel[]>([]);
-  const [visibleLabels, setVisibleLabels] = useState<CountryLabel[]>([]);
   const [arcs, setArcs] = useState<Arc[]>([]);
   const [points, setPoints] = useState<Dot[]>([]);
+  const globeMaterial = useMemo(() => {
+    const material = new THREE.MeshPhongMaterial({
+      color: "#0a1e2a",
+      emissive: new THREE.Color("#06121b"),
+      emissiveIntensity: 0.32,
+      shininess: 0,
+      specular: new THREE.Color(0x000000),
+    });
 
-  /* ---------- загрузка карт и расчёт подписей ---------- */
+    material.needsUpdate = true;
+    return material;
+  }, []);
+
+  /* ---------- загрузка карт ---------- */
   useEffect(() => {
     // стартовая точка обзора
     globeRef.current?.pointOfView({ lat: 30, lng: 20, altitude: 1.6 }, 1200);
@@ -79,57 +94,11 @@ export default function MapGlobe() {
         const feats = fc.features as CountryFeature[];
         setPolygons(feats);
 
-        // готовим подписи
-        const prepared = feats
-          .map((f, i) => {
-            const props = f.properties || {};
-            const rawName: string =
-              (props.name as string) ||
-              (props.ADMIN as string) ||
-              (props.name_long as string) ||
-              "";
-
-            if (!rawName) return null;
-
-            // d3-гео: centroid => [lng, lat]
-            const featureGeometry = f as Feature<Polygon | MultiPolygon, CountryProperties>;
-            const c = geoCentroid(featureGeometry);
-            const area = geoArea(featureGeometry);
-
-            return {
-              id: i,
-              name: rawName,
-              lng: c[0],
-              lat: c[1],
-              area,
-            } as CountryLabel;
-          })
-          .filter(Boolean) as CountryLabel[];
-
-        // отсечь совсем мелкие страны и отсортировать по площади
-        const labels = prepared
-          .filter((d) => d.area > 1e-4) // микроскопические острова
-          .sort((a, b) => b.area - a.area);
-
-        setLabelsAll(labels);
       })
       .catch(() => {
         // оффлайн — просто без подписей
       });
   }, []);
-
-  useEffect(() => {
-    const alt = camAltRef.current;
-
-    let take = 0;
-    if (alt > 2.2) take = 20;
-    else if (alt > 1.7) take = 45;
-    else if (alt > 1.4) take = 80;
-    else if (alt > 1.2) take = 120;
-    else take = 160;
-
-    setVisibleLabels(labelsAll.slice(0, take));
-  }, [labelsAll, tick]);
 
   /* ---------- простая SSE-логика (оставил как было) ---------- */
   useEffect(() => {
@@ -206,39 +175,6 @@ export default function MapGlobe() {
     return () => es.close();
   }, []);
 
-  /* ---------- динамический LOD для подписей (без лагов) ---------- */
-  // без setState на каждый zoom — только лёгкий "ping"
-  const handleZoom = () => {
-    const a = globeRef.current?.pointOfView()?.altitude;
-    if (typeof a === "number") {
-      camAltRef.current = a;
-      // лёгкое обновление для пересчёта visibleLabels (раз в ~150мс)
-      if (!zoomRaf.current) {
-        zoomRaf.current = requestAnimationFrame(() => {
-          zoomRaf.current = null;
-          setTick((t) => t + 1);
-        });
-      }
-    }
-  };
-  const zoomRaf = useRef<number | null>(null);
-
-  /* ---------- размер шрифта от площади (без тяжёлых вычислений) ---------- */
-  const computeLabelSize = (d: CountryLabel) => {
-    const a = d.area; // 0..~0.2
-    if (a > 0.08) return 1.35; // крупные (Россия, Канада, Китай)
-    if (a > 0.05) return 1.05;
-    if (a > 0.02) return 0.85;
-    if (a > 0.01) return 0.72;
-    if (a > 0.005) return 0.64;
-    return 0.56;
-  };
-
-  const labelLatAccessor: GlobeProps["labelLat"] = (d) => (d as CountryLabel).lat;
-  const labelLngAccessor: GlobeProps["labelLng"] = (d) => (d as CountryLabel).lng;
-  const labelTextAccessor: GlobeProps["labelText"] = (d) => (d as CountryLabel).name;
-  const labelSizeAccessor: GlobeProps["labelSize"] = (d) =>
-    computeLabelSize(d as CountryLabel);
   const pointLatAccessor: GlobeProps["pointLat"] = (d) => (d as Dot).lat;
   const pointLngAccessor: GlobeProps["pointLng"] = (d) => (d as Dot).lng;
   const pointColorAccessor: GlobeProps["pointColor"] = (d) => (d as Dot).color;
@@ -250,64 +186,96 @@ export default function MapGlobe() {
   const arcEndLngAccessor: GlobeProps["arcEndLng"] = (d) => (d as Arc).endLng;
   const arcColorAccessor: GlobeProps["arcColor"] = (d: object) => (d as Arc).color;
 
+  const combinedPoints = useMemo(() => {
+    const basePoints = points.filter((point) => point.id !== USER_POINT_ID);
+    if (!userLocation) return basePoints;
+
+    const { lat, lon, label } = userLocation;
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+      return basePoints;
+    }
+
+    return [
+      ...basePoints,
+      {
+        id: USER_POINT_ID,
+        lat,
+        lng: lon,
+        color: "#f97316",
+        size: 0.7,
+        label: label ?? "Ваше подключение",
+      },
+    ];
+  }, [points, userLocation]);
+
   return (
-    <div className="h-[70vh] md:h-[80vh] w-full">
-      <Globe
-        ref={globeRef}
-        backgroundColor="rgba(0,0,0,0)"
+    <div className="w-full">
+      <div
+        style={{
+          position: "relative",
+          width: "100%",
+          aspectRatio: "2 / 1",
+          minHeight: 360,
+          overflow: "hidden",
+          borderRadius: 12,
+          background: MAP_BACKGROUND,
+        }}
+      >
+        <Globe
+          ref={globeRef}
+          backgroundColor={"rgba(0, 0, 0, 0)"}
+          globeMaterial={globeMaterial}
+          style={{ width: "100%", height: "100%" }}
 
-        /* атмосфера и фон */
-        showAtmosphere
-        atmosphereColor={SEA_GLOW}
-        atmosphereAltitude={0.25}
-        globeImageUrl="//unpkg.com/three-globe/example/img/earth-dark.jpg"
-        bumpImageUrl="//unpkg.com/three-globe/example/img/earth-topology.png"
+          /* атмосфера и фон */
+          showAtmosphere
+          atmosphereColor={SEA_GLOW}
+          atmosphereAltitude={0.25}
 
-        /* материки */
-        polygonsData={polygons}
-        polygonAltitude={0.02}
-        polygonCapColor={() => LAND_CAP}
-        polygonSideColor={() => LAND_SIDE}
-        polygonStrokeColor={() => LAND_STROKE}
-        polygonsTransitionDuration={0}
+          /* материки */
+          polygonsData={polygons}
+          polygonAltitude={0.02}
+          polygonCapColor={() => LAND_CAP}
+          polygonSideColor={() => LAND_SIDE}
+          polygonStrokeColor={() => LAND_STROKE}
+          polygonsTransitionDuration={0}
 
-        /* подписи стран (точно по центроиду, чуть приподняты) */
-        labelsData={visibleLabels}
-        labelLat={labelLatAccessor}
-        labelLng={labelLngAccessor}
-        labelText={labelTextAccessor}
-        labelSize={labelSizeAccessor}
-        labelColor={() => LABEL_COLOR}
-        labelAltitude={0.03}
-        labelResolution={2}
-        labelIncludeDot={false}
+          polygonLabel={(feat) => {
+            const props = (feat as CountryFeature).properties || {};
+            return (
+              (props.name as string) ||
+              (props.ADMIN as string) ||
+              (props.name_long as string) ||
+              ""
+            );
+          }}
 
-        /* точки (агенты/цели) */
-        pointsData={points}
-        pointLat={pointLatAccessor}
-        pointLng={pointLngAccessor}
-        pointAltitude={0.01}
-        pointColor={pointColorAccessor}
-        pointRadius={pointRadiusAccessor}
-        pointLabel={pointLabelAccessor}
+          /* точки (агенты/цели) */
+          pointsData={combinedPoints}
+          pointLat={pointLatAccessor}
+          pointLng={pointLngAccessor}
+          pointAltitude={0.01}
+          pointColor={pointColorAccessor}
+          pointRadius={pointRadiusAccessor}
+          pointLabel={pointLabelAccessor}
 
-        /* дуги */
-        arcsData={arcs}
-        arcStartLat={arcStartLatAccessor}
-        arcStartLng={arcStartLngAccessor}
-        arcEndLat={arcEndLatAccessor}
-        arcEndLng={arcEndLngAccessor}
-        arcColor={arcColorAccessor}
-        arcAltitude={0.25}
-        arcStroke={0.6}
-        arcDashLength={0.45}
-        arcDashGap={0.2}
-        arcDashAnimateTime={1600}
+          /* дуги */
+          arcsData={arcs}
+          arcStartLat={arcStartLatAccessor}
+          arcStartLng={arcStartLngAccessor}
+          arcEndLat={arcEndLatAccessor}
+          arcEndLng={arcEndLngAccessor}
+          arcColor={arcColorAccessor}
+          arcAltitude={0.25}
+          arcStroke={0.6}
+          arcDashLength={0.45}
+          arcDashGap={0.2}
+          arcDashAnimateTime={1600}
 
-        /* интерактив */
-        enablePointerInteraction={true}
-        onZoom={handleZoom}
-      />
+          /* интерактив */
+          enablePointerInteraction={true}
+        />
+      </div>
     </div>
   );
 }

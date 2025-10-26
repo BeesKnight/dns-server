@@ -19,7 +19,7 @@
 - `dev/` — Dockerfile и вспомогательные сервисы для локального стенда (auth, sites, jobs, api-gw).
 - `data/` — каталог для размещения GeoLite баз, которые монтируются в docker-compose окружение.【F:docker-compose.yml†L34-L52】
 - `Makefile` — цели автоматизации запуска плейбуков и проверок.【F:Makefile†L1-L12】
-- `README.md` и `README-ops.md` — контракты control plane и операционные инструкции соответственно.【F:README.md†L1-L41】【F:README-ops.md†L1-L76】
+- `README.md` и `README-ops.md` — контракты control plane и операционные инструкции соответственно.【F:README.md†L1-L108】【F:README-ops.md†L1-L112】
 
 ## Переменные окружения
 | Переменная | Назначение | Значение/дефолт |

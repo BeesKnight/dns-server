@@ -223,7 +223,7 @@ export default function MapGlobe({ userLocation }: MapGlobeProps) {
       >
         <Globe
           ref={globeRef}
-          backgroundColor="rgba(0,0,0,0)"
+          backgroundColor={"rgba(0, 0, 0, 0)"}
           globeMaterial={globeMaterial}
           style={{ width: "100%", height: "100%" }}
 

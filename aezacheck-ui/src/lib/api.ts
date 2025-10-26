@@ -53,9 +53,9 @@ export type ProfileReview = {
   createdAt: string;
 };
 
-export type ProfileData = {
+export type UserProfile = {
   lastCheckAt: string | null;
-  totalReviews: number;
+  reviewCount: number;
   reviews: ProfileReview[];
 };
 
@@ -116,9 +116,9 @@ type RawProfileReview = {
   created_at: string;
 };
 
-type RawProfile = {
+type RawUserProfile = {
   last_check_at: string | null;
-  total_reviews: number;
+  review_count: number;
   reviews: RawProfileReview[];
 };
 
@@ -192,9 +192,9 @@ const mapProfileReview = (item: RawProfileReview): ProfileReview => ({
   createdAt: item.created_at,
 });
 
-const mapProfile = (raw: RawProfile): ProfileData => ({
+const mapProfile = (raw: RawUserProfile): UserProfile => ({
   lastCheckAt: raw.last_check_at ?? null,
-  totalReviews: typeof raw.total_reviews === "number" ? raw.total_reviews : 0,
+  reviewCount: typeof raw.review_count === "number" ? raw.review_count : 0,
   reviews: Array.isArray(raw.reviews) ? raw.reviews.map(mapProfileReview) : [],
 });
 
@@ -288,8 +288,10 @@ export const api = {
   },
 
   // --- profile ---
+  profile: () => call<UserProfile>("v1/profile"),
+
   getProfile: async () => {
-    const data = await call<RawProfile>("v1/profile");
+    const data = await call<RawUserProfile>("v1/profile");
     return mapProfile(data);
   },
 

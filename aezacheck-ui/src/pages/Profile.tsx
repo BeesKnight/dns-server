@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 
-import { api, type ProfileData } from "../lib/api";
+import { api, type UserProfile } from "../lib/api";
 import { useAuth } from "../store/auth";
 
 function BgFX() {
@@ -24,7 +24,7 @@ const stars = (rating: number) =>
 
 export default function Profile() {
   const { user } = useAuth();
-  const [profile, setProfile] = useState<ProfileData | null>(null);
+  const [profile, setProfile] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -43,7 +43,7 @@ export default function Profile() {
     setError(null);
 
     void api
-      .getProfile()
+      .profile()
       .then((data) => {
         if (!cancelled) setProfile(data);
       })
@@ -177,7 +177,7 @@ export default function Profile() {
             <div>
               <div className="text-xs uppercase tracking-wide text-slate-400">Статистика</div>
               <div className="mt-3 text-4xl font-semibold text-white">
-                {profile ? formatNumber(profile.totalReviews) : "—"}
+                {profile ? formatNumber(profile.reviewCount) : "—"}
               </div>
               <div className="text-sm text-slate-300">Всего отзывов</div>
             </div>

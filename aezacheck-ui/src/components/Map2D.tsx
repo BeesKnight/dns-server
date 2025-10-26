@@ -1,14 +1,7 @@
 // src/components/Map2D.tsx
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
-import {
-  geoMercator,
-  geoPath,
-  geoGraticule10,
-  geoCentroid,
-  geoInterpolate,
-  type GeoProjection
-} from "d3-geo";
+import { geoMercator, geoPath, geoGraticule10, type GeoProjection } from "d3-geo";
 import { feature } from "topojson-client";
 import type {
   FeatureCollection,
@@ -18,43 +11,67 @@ import type {
   MultiPolygon,
   Polygon,
 } from "geojson";
-import { mapSSE } from "../lib/api";
+import { useMapData, type MapAgentLocation, type MapCheckInfo } from "../hooks/useMapData";
 
 const BORDER_STROKE = "rgba(148, 210, 255, 0.35)";
 const GRID_STROKE = "rgba(56,189,248,.12)";
 const LAND_FILL_A = "#124f4c";
 const LAND_FILL_B = "#15524f";
 const HOVER_FILL = "#1b6b66";
-const ATTACK_COLOR = "#ff4bd6";
-const ATTACK_WIDTH = 2.8;
-const ATTACK_LIFETIME_MS = 2000;
 const USER_MARKER_GLOW = "rgba(249, 115, 22, 0.32)";
 const USER_MARKER_RING = "rgba(249, 115, 22, 0.16)";
 const USER_MARKER_FILL = "#fff7ed";
 const USER_MARKER_STROKE = "#f97316";
-const SPEED_MULTIPLIER = 1;
+const STATUS_COLORS: Record<MapCheckInfo["status"], string> = {
+  running: "#9b5de5",
+  ok: "#22c55e",
+  fail: "#ef4444",
+};
+const TARGET_COLORS: Record<MapCheckInfo["status"], string> = {
+  running: "#facc15",
+  ok: "#22c55e",
+  fail: "#f97316",
+};
+const AGENT_COLOR = "#59a5ff";
 
 type WorldFeature = Feature<Polygon | MultiPolygon, { NAME?: string; name?: string }>;
-type Attack = { id: number; from: [number, number]; to: [number, number]; };
 
-type NetworkNode = {
-  id: string;
-  name: string;
-  lat: number;
-  lng: number;
-  country: string;
-  status: "operational" | "degraded" | "maintenance";
-  service: string;
-  responseMs: number;
-  importance: number;
+type GeoLike = {
+  lat?: number | null;
+  lon?: number | null;
+  city?: string | null;
+  country?: string | null;
+  label?: string | null;
 };
 
-type NetworkRoute = {
+type MapMarker = {
   id: string;
-  from: string;
-  to: string;
-  label: string;
-  gradient: [string, string];
+  kind: "agent" | "source" | "hop" | "target";
+  lon: number;
+  lat: number;
+  status: MapCheckInfo["status"];
+  title: string;
+  subtitle?: string;
+  meta?: string[];
+  order?: number;
+};
+
+type MapSegment = {
+  id: string;
+  from: [number, number];
+  to: [number, number];
+  status: MapCheckInfo["status"];
+};
+
+type LegendEntry = {
+  id: string;
+  target: string;
+  status: MapCheckInfo["status"];
+  color: string;
+  hopCount: number;
+  reason?: string;
+  firstHop?: string;
+  sampleRtt?: number | null;
 };
 
 type UserLocation = {
@@ -65,20 +82,8 @@ type UserLocation = {
 
 type HoverState =
   | { type: "country"; name: string; x: number; y: number }
-  | {
-      type: "route";
-      x: number;
-      y: number;
-      route: NetworkRoute;
-      stats: { jitter: number; packetLoss: number };
-    }
-  | {
-      type: "user";
-      x: number;
-      y: number;
-      title: string;
-      subtitle?: string;
-    };
+  | { type: "marker"; x: number; y: number; marker: MapMarker }
+  | { type: "user"; x: number; y: number; title: string; subtitle?: string };
 
 type Props = {
   /** на сколько пикселей опустить карту вниз */
@@ -86,178 +91,188 @@ type Props = {
   userLocation?: UserLocation | null;
 };
 
-const BASE_NODES: NetworkNode[] = [
-  {
-    id: "ams-edge",
-    name: "Amsterdam Edge",
-    lat: 52.377,
-    lng: 4.897,
-    country: "Netherlands",
-    status: "operational",
-    service: "Recursive DNS",
-    responseMs: 28,
-    importance: 0.9
-  },
-  {
-    id: "sfo-core",
-    name: "San Francisco Core",
-    lat: 37.7749,
-    lng: -122.4194,
-    country: "United States",
-    status: "operational",
-    service: "Authoritative DNS",
-    responseMs: 34,
-    importance: 1
-  },
-  {
-    id: "gru-cache",
-    name: "São Paulo Cache",
-    lat: -23.5505,
-    lng: -46.6333,
-    country: "Brazil",
-    status: "degraded",
-    service: "RBL Service",
-    responseMs: 61,
-    importance: 0.7
-  },
-  {
-    id: "sin-edge",
-    name: "Singapore Edge",
-    lat: 1.3521,
-    lng: 103.8198,
-    country: "Singapore",
-    status: "operational",
-    service: "Zone Transfer",
-    responseMs: 42,
-    importance: 0.85
-  },
-  {
-    id: "dub-core",
-    name: "Dublin Control",
-    lat: 53.3498,
-    lng: -6.2603,
-    country: "Ireland",
-    status: "maintenance",
-    service: "Telemetry",
-    responseMs: 75,
-    importance: 0.6
-  },
-  {
-    id: "bom-edge",
-    name: "Mumbai Edge",
-    lat: 19.076,
-    lng: 72.8777,
-    country: "India",
-    status: "operational",
-    service: "Resolver",
-    responseMs: 55,
-    importance: 0.65
-  },
-  {
-    id: "jnb-observer",
-    name: "Johannesburg Observer",
-    lat: -26.2041,
-    lng: 28.0473,
-    country: "South Africa",
-    status: "operational",
-    service: "Latency Probe",
-    responseMs: 48,
-    importance: 0.5
-  },
-  {
-    id: "syd-core",
-    name: "Sydney Core",
-    lat: -33.8688,
-    lng: 151.2093,
-    country: "Australia",
-    status: "degraded",
-    service: "Threat Intel",
-    responseMs: 66,
-    importance: 0.8
-  },
-  {
-    id: "hnd-cache",
-    name: "Tokyo Cache",
-    lat: 35.6762,
-    lng: 139.6503,
-    country: "Japan",
-    status: "operational",
-    service: "DNSSEC",
-    responseMs: 37,
-    importance: 0.9
-  },
-  {
-    id: "cpt-monitor",
-    name: "Cape Town Monitor",
-    lat: -33.9249,
-    lng: 18.4241,
-    country: "South Africa",
-    status: "operational",
-    service: "TAC",
-    responseMs: 52,
-    importance: 0.45
-  }
-];
+type GraphicsResult = {
+  markers: MapMarker[];
+  segments: MapSegment[];
+  legend: LegendEntry[];
+};
 
-const BASE_ROUTES: NetworkRoute[] = [
-  {
-    id: "edge-eu",
-    from: "ams-edge",
-    to: "dub-core",
-    label: "EU Sync",
-    gradient: ["#60a5fa", "#f472b6"]
-  },
-  {
-    id: "transatlantic",
-    from: "dub-core",
-    to: "sfo-core",
-    label: "Atlantic Backbone",
-    gradient: ["#22d3ee", "#a855f7"]
-  },
-  {
-    id: "apac",
-    from: "sin-edge",
-    to: "hnd-cache",
-    label: "APAC Updates",
-    gradient: ["#34d399", "#38bdf8"]
-  },
-  {
-    id: "latam",
-    from: "gru-cache",
-    to: "sfo-core",
-    label: "LATAM Harvest",
-    gradient: ["#fb7185", "#f97316"]
-  },
-  {
-    id: "global-south",
-    from: "jnb-observer",
-    to: "sin-edge",
-    label: "Southern Transit",
-    gradient: ["#facc15", "#f472b6"]
-  },
-  {
-    id: "oceania",
-    from: "syd-core",
-    to: "sin-edge",
-    label: "Oceania Relay",
-    gradient: ["#6366f1", "#22d3ee"]
-  },
-  {
-    id: "indian-ocean",
-    from: "bom-edge",
-    to: "sin-edge",
-    label: "Indian Ocean Mesh",
-    gradient: ["#f97316", "#38bdf8"]
+const hasCoordinates = (geo?: GeoLike | null): geo is GeoLike & { lat: number; lon: number } => {
+  if (!geo) return false;
+  return typeof geo.lat === "number" && Number.isFinite(geo.lat) && typeof geo.lon === "number" && Number.isFinite(geo.lon);
+};
+
+const formatGeoLocation = (geo?: GeoLike | null): string => {
+  if (!geo) return "";
+  const parts: string[] = [];
+  if (typeof geo.city === "string" && geo.city.trim()) parts.push(geo.city.trim());
+  if (typeof geo.country === "string" && geo.country.trim()) parts.push(geo.country.trim());
+  return parts.join(", ");
+};
+
+const buildAgentMarker = (agent: MapAgentLocation): MapMarker | null => {
+  if (!hasCoordinates(agent.geo)) return null;
+  const title = agent.name?.trim() || agent.ip || `Agent ${agent.id.slice(0, 6)}`;
+  const subtitle = agent.ip && agent.ip !== title ? agent.ip : undefined;
+  const meta: string[] = [];
+  const location = agent.locationStr?.trim() || formatGeoLocation(agent.geo);
+  if (location) meta.push(location);
+  return {
+    id: `agent:${agent.id}`,
+    kind: "agent",
+    lon: agent.geo.lon,
+    lat: agent.geo.lat,
+    status: "running",
+    title,
+    subtitle,
+    meta,
+  } satisfies MapMarker;
+};
+
+const buildCheckGraphics = (check: MapCheckInfo): { markers: MapMarker[]; segments: MapSegment[] } => {
+  const markers: MapMarker[] = [];
+  const segments: MapSegment[] = [];
+  const pathPoints: [number, number][] = [];
+
+  const sourceGeo = hasCoordinates(check.source?.geo)
+    ? check.source?.geo
+    : hasCoordinates(check.agent?.geo)
+    ? check.agent?.geo
+    : undefined;
+
+  if (sourceGeo) {
+    pathPoints.push([sourceGeo.lon, sourceGeo.lat]);
+    const title = check.agent?.name
+      ? `Agent ${check.agent.name}`
+      : check.source?.ip
+      ? `Source ${check.source.ip}`
+      : "Source";
+    const subtitle =
+      check.agent?.ip && check.agent?.ip !== check.source?.ip
+        ? check.agent.ip
+        : check.source?.ip && !title.includes(check.source.ip)
+        ? check.source.ip
+        : undefined;
+    const meta: string[] = [];
+    const sourceLoc = check.source?.label?.trim() || formatGeoLocation(check.source?.geo ?? check.agent?.geo);
+    if (sourceLoc) meta.push(sourceLoc);
+    markers.push({
+      id: `source:${check.id}`,
+      kind: "source",
+      lon: sourceGeo.lon,
+      lat: sourceGeo.lat,
+      status: check.status,
+      title,
+      subtitle,
+      meta,
+    });
   }
-];
+
+  for (const hop of check.hops) {
+    if (!hasCoordinates(hop.geo)) continue;
+    pathPoints.push([hop.geo.lon, hop.geo.lat]);
+    const meta: string[] = [];
+    const hopLoc = formatGeoLocation(hop.geo);
+    if (hopLoc) meta.push(hopLoc);
+    if (typeof hop.rttMs === "number") meta.push(`RTT: ${hop.rttMs} ms`);
+    if (check.status === "fail" && check.reason) meta.push(`Reason: ${check.reason}`);
+    markers.push({
+      id: `hop:${check.id}:${hop.order}`,
+      kind: "hop",
+      lon: hop.geo.lon,
+      lat: hop.geo.lat,
+      status: check.status,
+      title: `Hop #${hop.order}`,
+      subtitle: hop.ip ?? undefined,
+      meta,
+      order: hop.order,
+    });
+  }
+
+  const targetGeo = hasCoordinates(check.target?.geo) ? check.target?.geo : undefined;
+  if (targetGeo) {
+    pathPoints.push([targetGeo.lon, targetGeo.lat]);
+    const meta: string[] = [];
+    const targetLoc = check.target?.label?.trim() || formatGeoLocation(check.target?.geo);
+    if (targetLoc) meta.push(targetLoc);
+    if (check.reason) meta.push(`Reason: ${check.reason}`);
+    const hopWithRtt = check.hops.find((hop) => typeof hop.rttMs === "number");
+    if (hopWithRtt?.rttMs !== undefined) meta.push(`Sample RTT: ${hopWithRtt.rttMs} ms`);
+    markers.push({
+      id: `target:${check.id}`,
+      kind: "target",
+      lon: targetGeo.lon,
+      lat: targetGeo.lat,
+      status: check.status,
+      title: check.target?.host || check.target?.ip || "Target",
+      subtitle: `Status: ${check.status.toUpperCase()}`,
+      meta,
+    });
+  }
+
+  for (let i = 0; i < pathPoints.length - 1; i += 1) {
+    const from = pathPoints[i];
+    const to = pathPoints[i + 1];
+    segments.push({
+      id: `${check.id}:${i}`,
+      from,
+      to,
+      status: check.status,
+    });
+  }
+
+  return { markers, segments };
+};
+
+const buildLegendEntries = (checks: MapCheckInfo[]): LegendEntry[] => {
+  return checks.slice(0, 6).map((check) => {
+    const firstHop = check.hops[0];
+    const firstHopParts: string[] = [];
+    if (firstHop) {
+      firstHopParts.push(`#${firstHop.order}`);
+      if (firstHop.ip) firstHopParts.push(firstHop.ip);
+      const loc = formatGeoLocation(firstHop.geo);
+      if (loc) firstHopParts.push(loc);
+    }
+    const hopWithRtt = check.hops.find((hop) => typeof hop.rttMs === "number");
+    return {
+      id: check.id,
+      target: check.target?.host || check.target?.ip || "Unknown target",
+      status: check.status,
+      color: STATUS_COLORS[check.status] ?? STATUS_COLORS.running,
+      hopCount: check.hops.length,
+      reason: check.reason ?? undefined,
+      firstHop: firstHopParts.length > 0 ? firstHopParts.join(" • ") : undefined,
+      sampleRtt: hopWithRtt?.rttMs ?? null,
+    } satisfies LegendEntry;
+  });
+};
+
+const buildMapGraphics = (agents: MapAgentLocation[], checks: MapCheckInfo[]): GraphicsResult => {
+  const markers: MapMarker[] = [];
+  const segments: MapSegment[] = [];
+
+  for (const agent of agents) {
+    const marker = buildAgentMarker(agent);
+    if (marker) markers.push(marker);
+  }
+
+  for (const check of checks) {
+    const { markers: checkMarkers, segments: checkSegments } = buildCheckGraphics(check);
+    markers.push(...checkMarkers);
+    segments.push(...checkSegments);
+  }
+
+  return { markers, segments, legend: buildLegendEntries(checks) };
+};
 
 function useSize<T extends HTMLElement>(ref: React.RefObject<T | null>) {
   const [size, setSize] = useState({ w: 0, h: 0 });
   useEffect(() => {
     if (!ref.current) return;
-    const ro = new ResizeObserver(([e]) => {
-      const r = e.contentRect;
-      setSize({ w: Math.max(300, r.width), h: Math.max(260, r.height) });
+    const ro = new ResizeObserver(([entry]) => {
+      const rect = entry.contentRect;
+      setSize({ w: Math.max(300, rect.width), h: Math.max(260, rect.height) });
     });
     ro.observe(ref.current);
     return () => ro.disconnect();
@@ -267,67 +282,29 @@ function useSize<T extends HTMLElement>(ref: React.RefObject<T | null>) {
 
 export default function Map2D({ offsetTop = 0, userLocation }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
-
-  // важно: высоту считаем от уже "подрезанного" контейнера
   const { w, h } = useSize(wrapRef);
+  const { agents, checks } = useMapData();
 
   const [worldFc, setWorldFc] = useState<FeatureCollection | null>(null);
   const [hover, setHover] = useState<HoverState | null>(null);
-  const [attacks, setAttacks] = useState<Attack[]>([]);
-  const centroidsRef = useRef<Record<string, [number, number]>>({});
-  const idRef = useRef(0);
   const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState(false);
-  const dragState = useRef({
-    active: false,
-    startX: 0,
-    startY: 0,
-    baseX: 0,
-    baseY: 0
-  });
+  const dragState = useRef({ active: false, startX: 0, startY: 0, baseX: 0, baseY: 0 });
 
   useEffect(() => {
     let alive = true;
     (async () => {
-      const topo = await fetch("https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json").then((r) =>
-        r.json()
-      );
+      const topo = await fetch("https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json").then((r) => r.json());
       if (!alive) return;
       const fc = feature(
         topo,
         topo.objects.countries
       ) as unknown as FeatureCollection<Geometry, GeoJsonProperties>;
       setWorldFc(fc);
-      const map: Record<string, [number, number]> = {};
-      for (const f of fc.features as WorldFeature[]) {
-        const nm = f.properties?.NAME || f.properties?.name;
-        if (nm) map[nm] = geoCentroid(f as Feature<Polygon | MultiPolygon>) as [number, number];
-      }
-      centroidsRef.current = map;
     })();
-    return () => { alive = false; };
-  }, []);
-
-  useEffect(() => {
-    const es = mapSSE();
-    es.onmessage = (ev) => {
-      try {
-        const msg = JSON.parse(ev.data);
-        if (msg.type === "check.start") {
-          const [slat, slng] = msg.data.source.geo;
-          const [tlat, tlng] = msg.data.target.geo;
-          const a: Attack = { id: idRef.current++, from: [slng, slat], to: [tlng, tlat] };
-          setAttacks(s => [...s, a]);
-          setTimeout(() => setAttacks(s => s.filter(x => x.id !== a.id)), ATTACK_LIFETIME_MS);
-        }
-      } catch (_error) {
-        // intentionally swallow malformed streaming updates
-        void _error;
-        return;
-      }
+    return () => {
+      alive = false;
     };
-    es.onerror = () => {};
-    return () => es.close();
   }, []);
 
   const projection: GeoProjection = useMemo(() => {
@@ -339,53 +316,15 @@ export default function Map2D({ offsetTop = 0, userLocation }: Props) {
     const scaleForWidth = (w / (2 * Math.PI)) * 0.95;
     const scaleForHeight = (h / Math.PI) * 0.95;
 
-    return mercator
-      .translate([w / 2, h / 2])
-      .scale(Math.min(scaleForWidth, scaleForHeight));
+    return mercator.translate([w / 2, h / 2]).scale(Math.min(scaleForWidth, scaleForHeight));
   }, [w, h]);
 
   const path = useMemo(() => geoPath(projection), [projection]);
   const graticule = useMemo(() => geoGraticule10(), []);
 
-  const nodeLookup = useMemo(() => {
-    return new Map(BASE_NODES.map((node) => [node.id, node] as const));
-  }, []);
-
-  const visibleRoutes = useMemo(() => {
-    return BASE_ROUTES.filter((route) => nodeLookup.has(route.from) && nodeLookup.has(route.to));
-  }, [nodeLookup]);
-
-  const routeStats = useMemo(() => {
-    const stats = new Map<string, { jitter: number; packetLoss: number }>();
-    for (const route of BASE_ROUTES) {
-      const seed = route.id.length;
-      const jitter = Math.round((seed % 7) * 2.3 + 3);
-      const packetLoss = Number(((seed % 3) * 0.35 + 0.1).toFixed(2));
-      stats.set(route.id, { jitter, packetLoss });
-    }
-    return stats;
-  }, []);
-
   const projectPoint = useMemo(() => {
-    return (lng: number, lat: number): [number, number] => {
-      return projection([lng, lat]) as [number, number];
-    };
+    return (lng: number, lat: number): [number, number] => projection([lng, lat]) as [number, number];
   }, [projection]);
-
-  const userMarker = useMemo(() => {
-    if (!userLocation) return null;
-    const { lat, lon, label } = userLocation;
-    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
-    const [x, y] = projectPoint(lon, lat);
-    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
-    const subtitle = label?.trim() ? label.trim() : undefined;
-    return {
-      x,
-      y,
-      title: "Ваше подключение",
-      subtitle,
-    };
-  }, [projectPoint, userLocation]);
 
   const createArcPath = useMemo(() => {
     return (from: [number, number], to: [number, number]) => {
@@ -405,34 +344,40 @@ export default function Map2D({ offsetTop = 0, userLocation }: Props) {
     };
   }, [projectPoint]);
 
-  const createTrailPath = useMemo(() => {
-    return (from: [number, number], to: [number, number]) => {
-      const interpolator = geoInterpolate([from[0], from[1]], [to[0], to[1]]);
-      const steps = 24;
-      const points: string[] = [];
-      for (let i = 0; i <= steps; i++) {
-        const [lng, lat] = interpolator(i / steps);
-        const [x, y] = projectPoint(lng, lat);
-        points.push(`${i === 0 ? "M" : "L"} ${x.toFixed(2)},${y.toFixed(2)}`);
-      }
-      return points.join(" ");
-    };
-  }, [projectPoint]);
+  const graphics = useMemo(() => buildMapGraphics(agents, checks), [agents, checks]);
 
-  useEffect(() => {
-    if (!wrapRef.current || attacks.length === 0) return;
-    const last = attacks[attacks.length - 1];
-    const el = wrapRef.current.querySelector(`path[data-attack-id="${last.id}"]`) as SVGPathElement | null;
-    if (!el) return;
-    const len = el.getTotalLength();
-    el.style.strokeDasharray = String(len);
-    el.style.strokeDashoffset = String(len);
-    el.style.opacity = "1";
-    el.getBoundingClientRect();
-    el.style.transition = "stroke-dashoffset 1.4s linear, opacity .5s ease .9s";
-    el.style.strokeDashoffset = "0";
-    setTimeout(() => { el.style.opacity = "0"; }, ATTACK_LIFETIME_MS - 600);
-  }, [attacks]);
+  const projectedMarkers = useMemo(() => {
+    return graphics.markers
+      .map((marker) => {
+        const [x, y] = projectPoint(marker.lon, marker.lat);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+        return { ...marker, x, y };
+      })
+      .filter((marker): marker is MapMarker & { x: number; y: number } => marker !== null);
+  }, [graphics.markers, projectPoint]);
+
+  const segmentPaths = useMemo(() => {
+    return graphics.segments.map((segment) => ({
+      id: segment.id,
+      d: createArcPath(segment.from, segment.to),
+      status: segment.status,
+    }));
+  }, [graphics.segments, createArcPath]);
+
+  const userMarker = useMemo(() => {
+    if (!userLocation) return null;
+    const { lat, lon, label } = userLocation;
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+    const [x, y] = projectPoint(lon, lat);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+    const subtitle = label?.trim() ? label.trim() : undefined;
+    return {
+      x,
+      y,
+      title: "Ваше подключение",
+      subtitle,
+    };
+  }, [projectPoint, userLocation]);
 
   const onEnterCountry = (e: ReactMouseEvent<SVGPathElement>, f: WorldFeature) => {
     const name = f.properties?.NAME || f.properties?.name || "";
@@ -440,6 +385,20 @@ export default function Map2D({ offsetTop = 0, userLocation }: Props) {
     setHover({ type: "country", name, x: e.clientX - svgRect.left + 12, y: e.clientY - svgRect.top + 12 });
   };
   const onLeaveCountry = () => setHover(null);
+
+  const handleMarkerEnter = (event: ReactMouseEvent<SVGGElement>, marker: MapMarker & { x: number; y: number }) => {
+    const svgRect = event.currentTarget.ownerSVGElement?.getBoundingClientRect();
+    if (!svgRect) return;
+    setHover({
+      type: "marker",
+      marker,
+      x: event.clientX - svgRect.left + 12,
+      y: event.clientY - svgRect.top + 12,
+    });
+  };
+
+  const handleMarkerLeave = () => setHover(null);
+
   const onSvgMove = (e: ReactMouseEvent<SVGSVGElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
     setHover((prev) => {
@@ -473,7 +432,7 @@ export default function Map2D({ offsetTop = 0, userLocation }: Props) {
         startX: event.clientX,
         startY: event.clientY,
         baseX: pan.x,
-        baseY: pan.y
+        baseY: pan.y,
       };
       setIsDragging(true);
       window.addEventListener("mousemove", handleDragMove);
@@ -489,38 +448,47 @@ export default function Map2D({ offsetTop = 0, userLocation }: Props) {
     };
   }, [handleDragMove, handleDragUp]);
 
-  const handleRouteEnter = (
-    e: ReactMouseEvent<SVGPathElement>,
-    route: NetworkRoute
-  ) => {
-    const svgRect = (e.currentTarget as SVGElement).ownerSVGElement!.getBoundingClientRect();
-    setHover({
-      type: "route",
-      route,
-      stats: routeStats.get(route.id) ?? { jitter: 5, packetLoss: 0.2 },
-      x: e.clientX - svgRect.left + 16,
-      y: e.clientY - svgRect.top + 16
-    });
-  };
-
-  const handleUserEnter = (
-    e: ReactMouseEvent<SVGCircleElement>
-  ) => {
+  const handleUserEnter = (event: ReactMouseEvent<SVGCircleElement>) => {
     if (!userMarker) return;
-    const svgRect = (e.currentTarget as SVGElement).ownerSVGElement?.getBoundingClientRect();
+    const svgRect = event.currentTarget.ownerSVGElement?.getBoundingClientRect();
     if (!svgRect) return;
     setHover({
       type: "user",
       title: userMarker.title,
       subtitle: userMarker.subtitle,
-      x: e.clientX - svgRect.left + 14,
-      y: e.clientY - svgRect.top + 14
+      x: event.clientX - svgRect.left + 14,
+      y: event.clientY - svgRect.top + 14,
     });
   };
 
   const handleUserLeave = () => setHover(null);
 
-  const userPulseDuration = useMemo(() => `${(4 / SPEED_MULTIPLIER).toFixed(2)}s`, []);
+  const userPulseDuration = useMemo(() => "4s", []);
+
+  const getMarkerFill = (marker: MapMarker) => {
+    if (marker.kind === "agent") return AGENT_COLOR;
+    if (marker.kind === "target") return TARGET_COLORS[marker.status] ?? TARGET_COLORS.running;
+    return STATUS_COLORS[marker.status] ?? STATUS_COLORS.running;
+  };
+
+  const getMarkerStroke = (marker: MapMarker) => {
+    if (marker.kind === "agent") return "rgba(59,130,246,0.65)";
+    if (marker.kind === "target") return "rgba(250,204,21,0.85)";
+    return "rgba(148,210,255,0.75)";
+  };
+
+  const getMarkerRadius = (marker: MapMarker) => {
+    switch (marker.kind) {
+      case "agent":
+        return 6.5;
+      case "source":
+        return 6;
+      case "target":
+        return 7.5;
+      default:
+        return 5;
+    }
+  };
 
   return (
     <div style={{ marginTop: offsetTop }} className="w-full">
@@ -533,7 +501,10 @@ export default function Map2D({ offsetTop = 0, userLocation }: Props) {
           minHeight: 360,
           overflow: "hidden",
           borderRadius: 12,
-          background: "radial-gradient(circle at 20% 30%, rgba(34,197,247,0.22), transparent 55%), radial-gradient(circle at 80% 15%, rgba(56,189,248,0.18), transparent 60%), linear-gradient(180deg,#050b1a 0%, #09142a 55%, #03070f 100%)"
+          background:
+            "radial-gradient(circle at 20% 30%, rgba(34,197,247,0.22), transparent 55%), " +
+            "radial-gradient(circle at 80% 15%, rgba(56,189,248,0.18), transparent 60%), " +
+            "linear-gradient(180deg,#050b1a 0%, #09142a 55%, #03070f 100%)",
         }}
       >
         <style>
@@ -543,21 +514,11 @@ export default function Map2D({ offsetTop = 0, userLocation }: Props) {
               50% { transform: scale(1.1); opacity: 1; }
               100% { transform: scale(0.85); opacity: 0.75; }
             }
-            @keyframes routeFlow {
-              0% { stroke-dashoffset: 100%; }
-              100% { stroke-dashoffset: 0%; }
-            }
             .map-node {
               transform-origin: center;
               animation-name: nodePulse;
               animation-iteration-count: infinite;
               will-change: transform, opacity;
-            }
-            .map-route-trail {
-              animation-name: routeFlow;
-              animation-iteration-count: infinite;
-              animation-timing-function: linear;
-              stroke-linecap: round;
             }
           `}
         </style>
@@ -592,26 +553,6 @@ export default function Map2D({ offsetTop = 0, userLocation }: Props) {
             <mask id="oceanMask">
               <rect width="100%" height="100%" fill="url(#oceanGlow)" />
             </mask>
-            {visibleRoutes.map((route) => {
-              const fromNode = nodeLookup.get(route.from)!;
-              const toNode = nodeLookup.get(route.to)!;
-              const [sx, sy] = projectPoint(fromNode.lng, fromNode.lat);
-              const [tx, ty] = projectPoint(toNode.lng, toNode.lat);
-              return (
-                <linearGradient
-                  key={route.id}
-                  id={`route-gradient-${route.id}`}
-                  gradientUnits="userSpaceOnUse"
-                  x1={sx}
-                  y1={sy}
-                  x2={tx}
-                  y2={ty}
-                >
-                  <stop offset="0%" stopColor={route.gradient[0]} />
-                  <stop offset="100%" stopColor={route.gradient[1]} />
-                </linearGradient>
-              );
-            })}
           </defs>
 
           <rect width={w} height={h} fill="url(#oceanGlow)" />
@@ -638,45 +579,46 @@ export default function Map2D({ offsetTop = 0, userLocation }: Props) {
                 />
               ))}
 
-            {visibleRoutes.map((route) => {
-              const from = nodeLookup.get(route.from)!;
-              const to = nodeLookup.get(route.to)!;
-              const pathD = createArcPath([from.lng, from.lat], [to.lng, to.lat]);
-              const trailD = createTrailPath([from.lng, from.lat], [to.lng, to.lat]);
-              const dashArray = 180;
-              const duration = `${(8 / SPEED_MULTIPLIER).toFixed(2)}s`;
-              return (
-                <g key={route.id}>
-                  <path
-                    d={trailD}
-                    fill="none"
-                    stroke={`url(#route-gradient-${route.id})`}
-                    strokeWidth={1.4}
-                    strokeDasharray={`${dashArray}`}
-                    className="map-route-trail"
-                    style={{
-                      animationDuration: duration,
-                      strokeOpacity: 0.55,
-                      strokeDashoffset: dashArray,
-                      cursor: isDragging ? "grabbing" : "pointer"
-                    }}
-                    onMouseEnter={(e) => handleRouteEnter(e, route)}
-                    onMouseLeave={() => setHover(null)}
-                  />
-                  <path
-                    d={pathD}
-                    fill="none"
-                    stroke={`url(#route-gradient-${route.id})`}
-                    strokeWidth={2.4}
-                    strokeOpacity={0.85}
-                    filter="url(#landHalo)"
-                    style={{ cursor: isDragging ? "grabbing" : "pointer" }}
-                    onMouseEnter={(e) => handleRouteEnter(e, route)}
-                    onMouseLeave={() => setHover(null)}
-                  />
-                </g>
-              );
-            })}
+            {segmentPaths.map((segment) => (
+              <path
+                key={segment.id}
+                d={segment.d}
+                fill="none"
+                stroke={STATUS_COLORS[segment.status] ?? STATUS_COLORS.running}
+                strokeWidth={2.4}
+                strokeLinecap="round"
+                strokeOpacity={0.75}
+              />
+            ))}
+
+            {projectedMarkers.map((marker) => (
+              <g
+                key={marker.id}
+                transform={`translate(${marker.x},${marker.y})`}
+                onMouseEnter={(event) => handleMarkerEnter(event, marker)}
+                onMouseLeave={handleMarkerLeave}
+                style={{ cursor: isDragging ? "grabbing" : "pointer" }}
+              >
+                <circle
+                  r={getMarkerRadius(marker)}
+                  fill={getMarkerFill(marker)}
+                  stroke={getMarkerStroke(marker)}
+                  strokeWidth={1.6}
+                  opacity={0.92}
+                />
+                {marker.kind === "hop" && typeof marker.order === "number" && (
+                  <text
+                    textAnchor="middle"
+                    dy={3}
+                    fontSize={9}
+                    fontWeight={600}
+                    fill="#0f172a"
+                  >
+                    {marker.order}
+                  </text>
+                )}
+              </g>
+            ))}
 
             {userMarker && (
               <g transform={`translate(${userMarker.x},${userMarker.y})`}>
@@ -697,7 +639,7 @@ export default function Map2D({ offsetTop = 0, userLocation }: Props) {
                   style={{
                     animationDuration: userPulseDuration,
                     animationDelay: "0s",
-                    cursor: isDragging ? "grabbing" : "pointer"
+                    cursor: isDragging ? "grabbing" : "pointer",
                   }}
                   onMouseEnter={handleUserEnter}
                   onMouseLeave={handleUserLeave}
@@ -705,24 +647,82 @@ export default function Map2D({ offsetTop = 0, userLocation }: Props) {
                 <circle r={3.2} fill={USER_MARKER_STROKE} pointerEvents="none" />
               </g>
             )}
-
-            {attacks.map((a) => {
-              const d = createArcPath(a.from, a.to);
-              return (
-                <path
-                  key={a.id}
-                  data-attack-id={a.id}
-                  d={d}
-                  fill="none"
-                  stroke={ATTACK_COLOR}
-                  strokeWidth={ATTACK_WIDTH}
-                  strokeLinecap="round"
-                  style={{ opacity: 0 }}
-                />
-              );
-            })}
           </g>
         </svg>
+
+        {graphics.legend.length > 0 && (
+          <div
+            style={{
+              position: "absolute",
+              top: 16,
+              left: 16,
+              width: "min(340px, 32%)",
+              padding: "12px 16px",
+              display: "grid",
+              gap: 12,
+              borderRadius: 12,
+              border: "1px solid rgba(56,189,248,0.25)",
+              background: "rgba(2, 6, 23, 0.74)",
+              backdropFilter: "blur(12px)",
+              boxShadow: "0 18px 40px rgba(2, 6, 23, 0.55)",
+              color: "#e2e8f0",
+              zIndex: 2,
+              pointerEvents: "auto",
+            }}
+          >
+            <div
+              style={{
+                fontSize: 12,
+                letterSpacing: 0.8,
+                textTransform: "uppercase",
+                fontWeight: 600,
+                color: "#bae6fd",
+              }}
+            >
+              Active checks
+            </div>
+            <div style={{ display: "grid", gap: 10 }}>
+              {graphics.legend.map((entry, idx) => (
+                <div
+                  key={entry.id}
+                  style={{
+                    display: "grid",
+                    gap: 6,
+                    paddingBottom: idx === graphics.legend.length - 1 ? 0 : 8,
+                    borderBottom:
+                      idx === graphics.legend.length - 1
+                        ? "none"
+                        : "1px solid rgba(56,189,248,0.18)",
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span
+                      style={{
+                        width: 10,
+                        height: 10,
+                        borderRadius: "9999px",
+                        background: entry.color,
+                        boxShadow: "0 0 12px rgba(56,189,248,0.3)",
+                      }}
+                    />
+                    <div style={{ fontWeight: 600, fontSize: 14 }}>{entry.target}</div>
+                  </div>
+                  <div style={{ fontSize: 12, color: "#94a3b8" }}>
+                    Status: {entry.status === "ok" ? "Success" : entry.status === "fail" ? "Failed" : "Running"}
+                  </div>
+                  <div style={{ fontSize: 12 }}>Hops: {entry.hopCount > 0 ? entry.hopCount : "—"}</div>
+                  {entry.firstHop && (
+                    <div style={{ fontSize: 12, color: "#cbd5f5" }}>First hop: {entry.firstHop}</div>
+                  )}
+                  {typeof entry.sampleRtt === "number" && (
+                    <div style={{ fontSize: 12, color: "#cbd5f5" }}>Sample RTT: {entry.sampleRtt} ms</div>
+                  )}
+                  {entry.reason && <div style={{ fontSize: 12, color: "#fca5a5" }}>Reason: {entry.reason}</div>}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {hover && (
           <div
@@ -738,28 +738,23 @@ export default function Map2D({ offsetTop = 0, userLocation }: Props) {
               fontSize: 12,
               border: "1px solid rgba(56,189,248,.25)",
               boxShadow: "0 10px 25px rgba(2,6,23,.55)",
-              maxWidth: 220
+              maxWidth: 240,
             }}
           >
             {hover.type === "country" && <div>{hover.name}</div>}
-            {hover.type === "route" && (
-              <div style={{ display: "grid", gap: 4 }}>
-                <div style={{ fontWeight: 600 }}>{hover.route.label}</div>
-                <div style={{ color: "#94a3b8" }}>
-                  {nodeLookup.get(hover.route.from)?.name} → {nodeLookup.get(hover.route.to)?.name}
-                </div>
-                <div>
-                  <span style={{ color: "#38bdf8" }}>Jitter:</span> {hover.stats.jitter} ms
-                </div>
-                <div>
-                  <span style={{ color: "#38bdf8" }}>Packet loss:</span> {hover.stats.packetLoss}%
-                </div>
-              </div>
-            )}
             {hover.type === "user" && (
               <div style={{ display: "grid", gap: 4 }}>
                 <div style={{ fontWeight: 600 }}>{hover.title}</div>
                 {hover.subtitle && <div style={{ color: "#94a3b8" }}>{hover.subtitle}</div>}
+              </div>
+            )}
+            {hover.type === "marker" && (
+              <div style={{ display: "grid", gap: 4 }}>
+                <div style={{ fontWeight: 600 }}>{hover.marker.title}</div>
+                {hover.marker.subtitle && <div style={{ color: "#94a3b8" }}>{hover.marker.subtitle}</div>}
+                {hover.marker.meta?.map((line, idx) => (
+                  <div key={`${hover.marker.id}-meta-${idx}`}>{line}</div>
+                ))}
               </div>
             )}
           </div>
@@ -768,3 +763,4 @@ export default function Map2D({ offsetTop = 0, userLocation }: Props) {
     </div>
   );
 }
+

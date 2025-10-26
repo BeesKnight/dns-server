@@ -4,6 +4,7 @@ import MapGlobe from "../components/MapGlobe";
 import Map2D from "../components/Map2D";
 import CheckSheet from "../components/CheckSheet";
 import { useConnection } from "../store/connection";
+import { useAuth } from "../store/auth";
 
 function BgFX() {
   return (
@@ -21,6 +22,7 @@ export default function Home() {
   const [mode, setMode] = useState<"2D" | "3D">("3D");
   const [open, setOpen] = useState(true);
   const { geo, ip } = useConnection();
+  const { user } = useAuth();
 
   const userLocation = useMemo(() => {
     if (!geo) return null;
@@ -92,6 +94,23 @@ export default function Home() {
             <rect x="14" y="14" width="7" height="7" rx="2" stroke="currentColor" strokeWidth="1.6"/>
           </svg>
           Сервисы
+        </Link>
+        <Link
+          to="/app/profile"
+          className="group inline-flex items-center gap-3 rounded-xl border border-white/10
+                     bg-black/30 hover:bg-white/10 backdrop-blur-md
+                     px-3 py-2 text-sm font-semibold text-slate-200 shadow-lg transition"
+          aria-label="Открыть профиль"
+        >
+          <div className="grid size-9 place-items-center rounded-lg border border-white/10 bg-white/10 text-base font-semibold text-white">
+            {(user?.email?.[0] ?? "").toUpperCase() || "👤"}
+          </div>
+          <div className="min-w-0 text-left leading-tight">
+            <div className="text-xs font-medium uppercase tracking-wide text-slate-400">Профиль</div>
+            <div className="max-w-[140px] truncate text-sm font-semibold text-white">
+              {user?.email ?? "Аккаунт"}
+            </div>
+          </div>
         </Link>
       </div>
 

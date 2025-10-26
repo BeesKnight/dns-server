@@ -50,6 +50,7 @@ export type ProfileReview = {
   rating: number;
   serviceId: string;
   serviceName: string;
+  text: string;
   createdAt: string;
 };
 
@@ -113,6 +114,7 @@ type RawProfileReview = {
   id: string;
   rating: number;
   service: { id: string; name: string } | null;
+  text: string;
   created_at: string;
 };
 
@@ -189,6 +191,7 @@ const mapProfileReview = (item: RawProfileReview): ProfileReview => ({
   rating: item.rating,
   serviceId: item.service?.id ?? "",
   serviceName: item.service?.name ?? "Неизвестный сервис",
+  text: item.text ?? "",
   createdAt: item.created_at,
 });
 

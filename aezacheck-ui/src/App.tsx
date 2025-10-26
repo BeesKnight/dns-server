@@ -4,6 +4,7 @@ import AuthPage from "./pages/Auth";
 import Home from "./pages/Home";
 import Services from "./pages/Services"; // <- добавили
 import Agents from "./pages/Agents";
+import Profile from "./pages/Profile";
 import { useAuth } from "./store/auth";
 
 /** Защищённый маршрут: ждём bootstrap(), потом пускаем только если user есть */
@@ -59,6 +60,14 @@ export default function App() {
           element={
             <Protected>
               <Agents />
+            </Protected>
+          }
+        />
+        <Route
+          path="/app/profile"
+          element={
+            <Protected>
+              <Profile />
             </Protected>
           }
         />

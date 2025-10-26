@@ -45,6 +45,21 @@ export type ServiceReviewCreateResult = {
   averageRating: number;
 };
 
+export type ProfileReview = {
+  id: string;
+  rating: number;
+  serviceId: string;
+  serviceName: string;
+  text: string;
+  createdAt: string;
+};
+
+export type UserProfile = {
+  lastCheckAt: string | null;
+  reviewCount: number;
+  reviews: ProfileReview[];
+};
+
 export type CheckResult = {
   id: string;
   kind: string;
@@ -133,6 +148,20 @@ type RawServiceReviewCreate = {
   average_rating: number;
 };
 
+type RawProfileReview = {
+  id: string;
+  rating: number;
+  service: { id: string; name: string } | null;
+  text: string;
+  created_at: string;
+};
+
+type RawUserProfile = {
+  last_check_at: string | null;
+  review_count: number;
+  reviews: RawProfileReview[];
+};
+
 type RawCheckResult = {
   id: string;
   kind: string;
@@ -219,6 +248,21 @@ const mapServiceReview = (item: RawServiceReview): ServiceReview => ({
   rating: item.rating,
   text: item.text,
   createdAt: item.created_at,
+});
+
+const mapProfileReview = (item: RawProfileReview): ProfileReview => ({
+  id: item.id,
+  rating: item.rating,
+  serviceId: item.service?.id ?? "",
+  serviceName: item.service?.name ?? "Неизвестный сервис",
+  text: item.text ?? "",
+  createdAt: item.created_at,
+});
+
+const mapProfile = (raw: RawUserProfile): UserProfile => ({
+  lastCheckAt: raw.last_check_at ?? null,
+  reviewCount: typeof raw.review_count === "number" ? raw.review_count : 0,
+  reviews: Array.isArray(raw.reviews) ? raw.reviews.map(mapProfileReview) : [],
 });
 
 const mapCheckResult = (item: RawCheckResult): CheckResult => ({
@@ -356,6 +400,14 @@ export const api = {
       reviewCount: data.review_count,
       averageRating: data.average_rating,
     } satisfies ServiceReviewCreateResult;
+  },
+
+  // --- profile ---
+  profile: () => call<UserProfile>("v1/profile"),
+
+  getProfile: async () => {
+    const data = await call<RawUserProfile>("v1/profile");
+    return mapProfile(data);
   },
 
   // --- checks ---

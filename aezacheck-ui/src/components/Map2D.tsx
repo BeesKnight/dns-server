@@ -32,6 +32,7 @@ const USER_MARKER_GLOW = "rgba(249, 115, 22, 0.32)";
 const USER_MARKER_RING = "rgba(249, 115, 22, 0.16)";
 const USER_MARKER_FILL = "#fff7ed";
 const USER_MARKER_STROKE = "#f97316";
+const SPEED_MULTIPLIER = 1;
 
 type WorldFeature = Feature<Polygon | MultiPolygon, { NAME?: string; name?: string }>;
 type Attack = { id: number; from: [number, number]; to: [number, number]; };
@@ -64,12 +65,6 @@ type UserLocation = {
 
 type HoverState =
   | { type: "country"; name: string; x: number; y: number }
-  | {
-      type: "node";
-      x: number;
-      y: number;
-      node: NetworkNode;
-    }
   | {
       type: "route";
       x: number;
@@ -281,8 +276,6 @@ export default function Map2D({ offsetTop = 0, userLocation }: Props) {
   const [attacks, setAttacks] = useState<Attack[]>([]);
   const centroidsRef = useRef<Record<string, [number, number]>>({});
   const idRef = useRef(0);
-  const [nodeDensity, setNodeDensity] = useState(0.9);
-  const [speedMultiplier, setSpeedMultiplier] = useState(1);
   const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState(false);
   const dragState = useRef({
@@ -354,17 +347,9 @@ export default function Map2D({ offsetTop = 0, userLocation }: Props) {
   const path = useMemo(() => geoPath(projection), [projection]);
   const graticule = useMemo(() => geoGraticule10(), []);
 
-  const sortedNodes = useMemo(() => [...BASE_NODES].sort((a, b) => b.importance - a.importance), []);
-  const visibleNodes = useMemo(() => {
-    const count = Math.max(3, Math.round(sortedNodes.length * nodeDensity));
-    return sortedNodes.slice(0, count);
-  }, [sortedNodes, nodeDensity]);
-
   const nodeLookup = useMemo(() => {
-    const map = new Map<string, NetworkNode>();
-    for (const node of visibleNodes) map.set(node.id, node);
-    return map;
-  }, [visibleNodes]);
+    return new Map(BASE_NODES.map((node) => [node.id, node] as const));
+  }, []);
 
   const visibleRoutes = useMemo(() => {
     return BASE_ROUTES.filter((route) => nodeLookup.has(route.from) && nodeLookup.has(route.to));
@@ -504,19 +489,6 @@ export default function Map2D({ offsetTop = 0, userLocation }: Props) {
     };
   }, [handleDragMove, handleDragUp]);
 
-  const handleNodeEnter = (
-    e: ReactMouseEvent<SVGCircleElement>,
-    node: NetworkNode
-  ) => {
-    const svgRect = (e.currentTarget as SVGElement).ownerSVGElement!.getBoundingClientRect();
-    setHover({
-      type: "node",
-      node,
-      x: e.clientX - svgRect.left + 14,
-      y: e.clientY - svgRect.top + 14
-    });
-  };
-
   const handleRouteEnter = (
     e: ReactMouseEvent<SVGPathElement>,
     route: NetworkRoute
@@ -548,7 +520,7 @@ export default function Map2D({ offsetTop = 0, userLocation }: Props) {
 
   const handleUserLeave = () => setHover(null);
 
-  const userPulseDuration = useMemo(() => `${(4 / speedMultiplier).toFixed(2)}s`, [speedMultiplier]);
+  const userPulseDuration = useMemo(() => `${(4 / SPEED_MULTIPLIER).toFixed(2)}s`, []);
 
   return (
     <div style={{ marginTop: offsetTop }} className="w-full">
@@ -672,7 +644,7 @@ export default function Map2D({ offsetTop = 0, userLocation }: Props) {
               const pathD = createArcPath([from.lng, from.lat], [to.lng, to.lat]);
               const trailD = createTrailPath([from.lng, from.lat], [to.lng, to.lat]);
               const dashArray = 180;
-              const duration = `${(8 / speedMultiplier).toFixed(2)}s`;
+              const duration = `${(8 / SPEED_MULTIPLIER).toFixed(2)}s`;
               return (
                 <g key={route.id}>
                   <path
@@ -700,41 +672,6 @@ export default function Map2D({ offsetTop = 0, userLocation }: Props) {
                     filter="url(#landHalo)"
                     style={{ cursor: isDragging ? "grabbing" : "pointer" }}
                     onMouseEnter={(e) => handleRouteEnter(e, route)}
-                    onMouseLeave={() => setHover(null)}
-                  />
-                </g>
-              );
-            })}
-
-            {visibleNodes.map((node, idx) => {
-              const [x, y] = projectPoint(node.lng, node.lat);
-              const pulseDuration = `${(4.5 / (speedMultiplier * (0.6 + node.importance))).toFixed(2)}s`;
-              const markerSize = 4 + node.importance * 4;
-              return (
-                <g key={node.id} transform={`translate(${x},${y})`}>
-                  <circle
-                    r={markerSize * 1.9}
-                    fill={`rgba(56,189,248,${0.12 + idx * 0.03})`}
-                    opacity={0.65}
-                  />
-                  <circle
-                    r={markerSize * 1.3}
-                    fill="rgba(14,165,233,0.35)"
-                    className="map-node"
-                    style={{ animationDuration: pulseDuration, animationDelay: `${idx * 0.25}s` }}
-                  />
-                  <circle
-                    r={markerSize}
-                    fill="#e0f2fe"
-                    stroke="#38bdf8"
-                    strokeWidth={1.2}
-                    className="map-node"
-                    style={{
-                      animationDuration: pulseDuration,
-                      animationDelay: `${idx * 0.25}s`,
-                      cursor: isDragging ? "grabbing" : "pointer"
-                    }}
-                    onMouseEnter={(e) => handleNodeEnter(e, node)}
                     onMouseLeave={() => setHover(null)}
                   />
                 </g>
@@ -805,21 +742,6 @@ export default function Map2D({ offsetTop = 0, userLocation }: Props) {
             }}
           >
             {hover.type === "country" && <div>{hover.name}</div>}
-            {hover.type === "node" && (
-              <div style={{ display: "grid", gap: 4 }}>
-                <div style={{ fontWeight: 600 }}>{hover.node.name}</div>
-                <div style={{ color: "#94a3b8" }}>{hover.node.country}</div>
-                <div>
-                  <span style={{ color: "#38bdf8" }}>Service:</span> {hover.node.service}
-                </div>
-                <div>
-                  <span style={{ color: "#38bdf8" }}>Status:</span> {hover.node.status}
-                </div>
-                <div>
-                  <span style={{ color: "#38bdf8" }}>Response:</span> {hover.node.responseMs} ms
-                </div>
-              </div>
-            )}
             {hover.type === "route" && (
               <div style={{ display: "grid", gap: 4 }}>
                 <div style={{ fontWeight: 600 }}>{hover.route.label}</div>
@@ -842,49 +764,6 @@ export default function Map2D({ offsetTop = 0, userLocation }: Props) {
             )}
           </div>
         )}
-
-        <div
-          style={{
-            position: "absolute",
-            right: 16,
-            bottom: 16,
-            width: 240,
-            background: "rgba(3,7,18,0.82)",
-            border: "1px solid rgba(56,189,248,0.25)",
-            borderRadius: 12,
-            padding: "12px 16px",
-            color: "#cbd5f5",
-            boxShadow: "0 16px 40px rgba(2,6,23,0.65)",
-            display: "grid",
-            gap: 12
-          }}
-        >
-          <div style={{ fontWeight: 600, fontSize: 13, letterSpacing: "0.02em" }}>Карта трафика</div>
-          <label style={{ display: "grid", gap: 6, fontSize: 12 }}>
-            <span style={{ color: "#94a3b8" }}>Плотность узлов ({visibleNodes.length}/{BASE_NODES.length})</span>
-            <input
-              type="range"
-              min={0.3}
-              max={1}
-              step={0.1}
-              value={nodeDensity}
-              onChange={(e) => setNodeDensity(Number(e.target.value))}
-              style={{ accentColor: "#38bdf8" }}
-            />
-          </label>
-          <label style={{ display: "grid", gap: 6, fontSize: 12 }}>
-            <span style={{ color: "#94a3b8" }}>Скорость анимации ({speedMultiplier.toFixed(1)}x)</span>
-            <input
-              type="range"
-              min={0.6}
-              max={2.2}
-              step={0.1}
-              value={speedMultiplier}
-              onChange={(e) => setSpeedMultiplier(Number(e.target.value))}
-              style={{ accentColor: "#f472b6" }}
-            />
-          </label>
-        </div>
       </div>
     </div>
   );

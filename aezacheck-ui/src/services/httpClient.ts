@@ -31,11 +31,44 @@ const toNumber = (value: string | undefined, fallback: number) => {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 };
 
-const BASE_URL = ((): string => {
+const isAbsoluteUrl = (value: string): boolean => /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(value);
+
+const trimTrailingSlash = (value: string): string => value.replace(/\/+$/, "");
+
+const ensureVersionSegment = (value: string): string => {
+  if (value === "") {
+    return "/v1";
+  }
+
+  if (isAbsoluteUrl(value)) {
+    try {
+      const url = new URL(value);
+      const pathname = trimTrailingSlash(url.pathname);
+      if (!/\/v\d+(?:\b|\/)/.test(pathname)) {
+        url.pathname = `${pathname || ""}/v1`;
+      }
+      return trimTrailingSlash(url.toString());
+    } catch {
+      // fall through to relative handling if URL parsing fails
+    }
+  }
+
+  const normalized = value.startsWith("/") ? trimTrailingSlash(value) : `/${trimTrailingSlash(value)}`;
+  if (/\/v\d+(?:\b|\/)/.test(normalized)) {
+    return normalized;
+  }
+  return `${normalized}/v1`;
+};
+
+const resolveBaseUrl = (): string => {
   const explicit = import.meta.env.VITE_API_BASE?.trim();
-  if (explicit) return explicit.replace(/\/?$/, "");
-  return import.meta.env.DEV ? "/api" : "/v1";
-})();
+  const fallback = import.meta.env.DEV ? "/api" : "";
+  return ensureVersionSegment(trimTrailingSlash(explicit ?? fallback));
+};
+
+const BASE_URL = resolveBaseUrl();
+
+export const API_BASE_URL = BASE_URL;
 
 const DEFAULT_TIMEOUT = toNumber(import.meta.env.VITE_API_TIMEOUT, 15000);
 const DEFAULT_RETRIES = toNumber(import.meta.env.VITE_API_RETRY_LIMIT, 2);

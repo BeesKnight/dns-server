@@ -207,9 +207,7 @@ type RawMapEvent = {
   data?: Record<string, unknown>;
 };
 
-const API_BASE = import.meta.env.VITE_API_BASE?.replace(/\/?$/, "") ?? (import.meta.env.DEV ? "/api" : "/v1");
-
-import { buildQuery, request } from "../services";
+import { API_BASE_URL, buildQuery, request } from "../services";
 
 type CallInit = Omit<RequestInit, "body"> & {
   method?: string;
@@ -338,7 +336,7 @@ const mapMapEvent = (raw: unknown): MapEvent | null => {
  * поэтому при необходимости передаём токен в query.
  */
 export function mapSSE(): EventSource {
-  const base = API_BASE.replace(/\/?$/, "");
+  const base = API_BASE_URL.replace(/\/?$/, "");
   const origin = typeof window !== "undefined" ? window.location.origin : "http://localhost";
   const url = new URL(`${base}/map/events`, origin);
   const t = localStorage.getItem("access_token");

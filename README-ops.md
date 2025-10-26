@@ -88,6 +88,36 @@ configured entirely through environment variables rendered by
 `go build .` and deploys the single binary with migrations embedded, so no
 separate `migrate` command is required.【F:group_vars/jobs_svc.yml†L5-L35】【F:infra/inventory/group_vars/jobs_svc.yml†L5-L35】【F:services/jobs-svc/migrate.go†L11-L71】
 
+## Popular service catalogue refresh
+
+The jobs control plane now owns the "popular services" catalogue that powers
+the marketing UI in `dev/sites-svc`.
+
+* A new migration seeds `popular_services_catalog` with the static metadata
+  (ID, name, URL, default rating weight).【F:services/jobs-svc/migrations/0006_popular_services.sql†L1-L26】
+* Background goroutine `popularServiceLoop` (enabled by default) schedules a
+  quick HTTP check for each active catalogue entry every
+  `POPULAR_CHECK_INTERVAL` (default `5m`). It persists check → service mappings
+  in `popular_service_runs` so later reports can be attributed.【F:services/jobs-svc/popular_services.go†L25-L121】
+* When an agent reports a result, the jobs service aggregates the last
+  `POPULAR_SNAPSHOT_WINDOW` (default `24h`) of outcomes into
+  `popular_service_snapshots`, recording the latest status, derived rating and
+  hourly execution counts. Records older than `POPULAR_SNAPSHOT_STALE` (default
+  `30m`) are treated as stale and the UI will fall back to seeded defaults.【F:services/jobs-svc/popular_services.go†L123-L215】
+* `dev/sites-svc` now reads the catalogue via SQL, merges user reviews with the
+  agent-derived ratings, and only uses the old hard-coded data if no fresh
+  snapshot exists.【F:dev/sites-svc/main.go†L124-L205】【F:dev/sites-svc/main.go†L829-L864】
+
+Operations can tune the cadence and retention by setting the new
+environment variables on `jobs-svc` deployments:
+
+* `POPULAR_CHECK_INTERVAL`
+* `POPULAR_SNAPSHOT_WINDOW`
+* `POPULAR_SNAPSHOT_STALE`
+
+No additional cron or external scheduler is required; a restart will pick up
+configuration changes immediately.
+
 All sensitive values must be stored in the encrypted
 `group_vars/all/vault.yml` file. Environments can override any of the variables
 by adding additional files under `inventories/<env>/group_vars/`.

@@ -16,6 +16,15 @@ export type GeoInfo = {
   asn_org: string | null;
 };
 
+type RawGeoInfo = {
+  lat?: number | string | null;
+  lon?: number | string | null;
+  city?: string | null;
+  country?: string | null;
+  asn?: number | string | null;
+  asn_org?: string | null;
+};
+
 export type ServiceSummary = {
   id: string;
   name: string;
@@ -282,6 +291,30 @@ const mapCheckResults = (raw: RawCheckResults): CheckResults => ({
   results: Array.isArray(raw.results) ? raw.results.map(mapCheckResult) : [],
 });
 
+const toNumberOrNull = (value: number | string | null | undefined) => {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    const numeric = Number(trimmed);
+    return Number.isFinite(numeric) ? numeric : null;
+  }
+  const numeric = value;
+  return Number.isFinite(numeric) ? numeric : null;
+};
+
+const mapGeoInfo = (geo: RawGeoInfo | null | undefined): GeoInfo | null => {
+  if (!geo) return null;
+  return {
+    lat: toNumberOrNull(geo.lat),
+    lon: toNumberOrNull(geo.lon),
+    city: geo.city ?? null,
+    country: geo.country ?? null,
+    asn: toNumberOrNull(geo.asn),
+    asn_org: geo.asn_org ?? null,
+  } satisfies GeoInfo;
+};
+
 const mapMapGeo = (geo: RawMapGeo | null | undefined): MapGeo | null => {
   if (!geo) return null;
   const lat = Number(geo.lat);
@@ -364,8 +397,12 @@ export const api = {
     call<User>("auth/me"),
 
   // --- geo ---
-  geoLookup: (ip: string) =>
-    call<GeoInfo>(`geo/lookup?ip=${encodeURIComponent(ip)}`),
+  geoLookup: async (ip: string) => {
+    const response = await call<{ ip: string; geo?: RawGeoInfo | null }>(
+      `geo/lookup?ip=${encodeURIComponent(ip)}`
+    );
+    return mapGeoInfo(response.geo);
+  },
 
   // --- services ---
   listServices: async () => {

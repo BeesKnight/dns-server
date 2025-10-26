@@ -50,7 +50,7 @@ const fetchConnection = async () => {
     try {
       const user = await api.me();
       const currentIp = user.current_ip ?? null;
-      setState({ ip: currentIp });
+      setState({ ip: currentIp, geo: null });
 
       if (currentIp) {
         try {
@@ -58,12 +58,12 @@ const fetchConnection = async () => {
           setState({ geo });
         } catch (geoError) {
           const err = geoError instanceof Error ? geoError : new Error("Geo lookup failed");
-          setState({ error: err });
+          setState({ error: err, geo: null });
         }
       }
     } catch (error) {
       const err = error instanceof Error ? error : new Error("Failed to load connection info");
-      setState({ error: err });
+      setState({ error: err, geo: null });
     } finally {
       setState({ loading: false });
       inFlight = null;

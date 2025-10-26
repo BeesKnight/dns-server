@@ -1,16 +1,18 @@
 use std::collections::HashMap;
 use std::env;
 use std::future::Future;
+use std::net::{IpAddr, SocketAddr};
 use std::panic::AssertUnwindSafe;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
 };
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use futures::future::{BoxFuture, FutureExt};
+use serde_json::json;
 use tokio::runtime::Builder;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinHandle, JoinSet};
@@ -18,10 +20,11 @@ use tracing::{debug, error, warn};
 
 use crate::concurrency::{ConcurrencyController, ConcurrencyLimits};
 use crate::control_plane::{
-    ControlPlaneClient, ControlPlaneTransport, LeaseReport, Observation, TaskKind,
+    ControlPlaneClient, ControlPlaneTransport, LeaseReport, Observation, TaskKind, TaskSpec,
 };
 use crate::dispatcher::{DispatchQueues, DispatchedLease, LeaseAssignment};
 use crate::lease_extender::LeaseExtenderClient;
+use crate::resolver::{DnsResolver, Resolution};
 
 mod ping;
 pub mod storage;
@@ -524,13 +527,161 @@ impl WorkerHandler for DnsWorker {
             debug!(lease_id = lease.lease_id, kind = ?lease.kind, "DNS lease cancelled before start");
             return Ok(WorkerReport::cancelled(lease.lease_id));
         }
-        debug!(lease_id = lease.lease_id, kind = ?lease.kind, "processing DNS lease");
-        if token.is_cancelled() {
-            debug!(lease_id = lease.lease_id, kind = ?lease.kind, "DNS lease cancelled during processing");
-            return Ok(WorkerReport::cancelled(lease.lease_id));
-        }
-        Ok(WorkerReport::completed(lease.lease_id))
+        let (query, server_override) = match &lease.spec {
+            TaskSpec::Dns { query, server } => (query.clone(), server.clone()),
+            other => {
+                return Err(anyhow!("unexpected spec for DNS worker: {other:?}"));
+            }
+        };
+
+        debug!(lease_id = lease.lease_id, kind = ?lease.kind, %query, "processing DNS lease");
+
+        let upstream = resolve_dns_server(server_override.as_deref())?;
+        let timeout = resolve_dns_timeout();
+        let resolver = DnsResolver::new(upstream, timeout);
+
+        let report = match resolver.resolve(&query).await {
+            Ok(resolution) => {
+                if token.is_cancelled() {
+                    debug!(
+                        lease_id = lease.lease_id,
+                        kind = ?lease.kind,
+                        %query,
+                        "DNS lease cancelled during processing"
+                    );
+                    return Ok(WorkerReport::cancelled(lease.lease_id));
+                }
+
+                let observations = dns_observations(&query, upstream, resolution.as_ref());
+                WorkerReport::completed(lease.lease_id)
+                    .with_observations(lease.lease_id, observations)
+            }
+            Err(err) => {
+                warn!(
+                    lease_id = lease.lease_id,
+                    kind = ?lease.kind,
+                    %query,
+                    server = %upstream,
+                    error = %err,
+                    "DNS resolution failed"
+                );
+                WorkerReport::completed(lease.lease_id).with_observation(
+                    lease.lease_id,
+                    Observation {
+                        name: "dns_error".into(),
+                        value: json!({
+                            "query": query,
+                            "server": upstream.to_string(),
+                            "error": err.to_string(),
+                        }),
+                        unit: None,
+                    },
+                )
+            }
+        };
+
+        Ok(report)
     }
+}
+
+fn resolve_dns_server(server: Option<&str>) -> Result<SocketAddr> {
+    if let Some(value) = server {
+        parse_socket_addr(value)
+    } else {
+        configured_dns_upstream()
+    }
+}
+
+fn parse_socket_addr(value: &str) -> Result<SocketAddr> {
+    if let Ok(addr) = value.parse::<SocketAddr>() {
+        Ok(addr)
+    } else if let Ok(ip) = value.parse::<IpAddr>() {
+        Ok(SocketAddr::new(ip, 53))
+    } else {
+        Err(anyhow!("invalid DNS server '{value}'"))
+    }
+}
+
+fn configured_dns_upstream() -> Result<SocketAddr> {
+    match env::var("AGENT_DNS_UPSTREAM") {
+        Ok(value) => parse_socket_addr(&value),
+        Err(env::VarError::NotPresent) => "127.0.0.1:5354"
+            .parse()
+            .map_err(|err| anyhow!("invalid default DNS upstream: {err}")),
+        Err(env::VarError::NotUnicode(_)) => {
+            Err(anyhow!("AGENT_DNS_UPSTREAM must be valid unicode"))
+        }
+    }
+}
+
+fn resolve_dns_timeout() -> Duration {
+    env::var("AGENT_DNS_UPSTREAM_TIMEOUT_MS")
+        .ok()
+        .and_then(|val| val.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or_else(|| Duration::from_millis(2500))
+}
+
+fn dns_observations(query: &str, server: SocketAddr, resolution: &Resolution) -> Vec<Observation> {
+    let mut observations = Vec::new();
+
+    observations.extend(resolution.a_records.iter().map(|record| Observation {
+        name: "dns_a_record".into(),
+        value: json!({
+            "query": query,
+            "server": server.to_string(),
+            "address": record.addr.to_string(),
+            "ttl": record.ttl,
+        }),
+        unit: None,
+    }));
+
+    observations.extend(resolution.aaaa_records.iter().map(|record| Observation {
+        name: "dns_aaaa_record".into(),
+        value: json!({
+            "query": query,
+            "server": server.to_string(),
+            "address": record.addr.to_string(),
+            "ttl": record.ttl,
+        }),
+        unit: None,
+    }));
+
+    observations.extend(resolution.mx_records.iter().map(|record| Observation {
+        name: "dns_mx_record".into(),
+        value: json!({
+            "query": query,
+            "server": server.to_string(),
+            "preference": record.preference,
+            "exchange": record.exchange.clone(),
+            "ttl": record.ttl,
+        }),
+        unit: None,
+    }));
+
+    observations.extend(resolution.ns_records.iter().map(|record| Observation {
+        name: "dns_ns_record".into(),
+        value: json!({
+            "query": query,
+            "server": server.to_string(),
+            "host": record.host.clone(),
+            "ttl": record.ttl,
+        }),
+        unit: None,
+    }));
+
+    observations.extend(resolution.txt_records.iter().map(|record| Observation {
+        name: "dns_txt_record".into(),
+        value: json!({
+            "query": query,
+            "server": server.to_string(),
+            "data": record.data.clone(),
+            "ttl": record.ttl,
+        }),
+        unit: None,
+    }));
+
+    observations
 }
 
 /// Default worker implementation for HTTP checks.

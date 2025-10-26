@@ -2,7 +2,7 @@ mod support;
 
 use std::collections::VecDeque;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
@@ -25,11 +25,45 @@ use dns_agent::workers::{
     TraceProbeRequest, TraceStatus, TraceWorker, WorkerHandler, WorkerHandlers, WorkerPoolsConfig,
     WorkerReport,
 };
+use dns_agent::{BytePacketBuf, Dns, DnsRecord, QueryType};
 use serde_json::json;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, UdpSocket};
 use tokio_util::sync::CancellationToken;
 
 include!(concat!(env!("OUT_DIR"), "/worker_test_macro.rs"));
+
+fn copy_into_packet(bytes: &[u8]) -> Dns {
+    let mut packet = BytePacketBuf::new();
+    packet.as_mut_slice()[..bytes.len()].copy_from_slice(bytes);
+    packet.set_len(bytes.len()).unwrap();
+    packet.seek(0).unwrap();
+    Dns::parse_req(&mut packet).unwrap()
+}
+
+fn make_response(id: u16, qname: &str, record: DnsRecord) -> Vec<u8> {
+    let mut buffer = BytePacketBuf::new();
+    buffer.write_u16(id).unwrap();
+    buffer.write_u16(0x8180).unwrap();
+    buffer.write_u16(1).unwrap();
+    buffer.write_u16(1).unwrap();
+    buffer.write_u16(0).unwrap();
+    buffer.write_u16(0).unwrap();
+    buffer.write_qname(qname).unwrap();
+    let qtype = match record {
+        DnsRecord::A { .. } => QueryType::A,
+        DnsRecord::AAAA { .. } => QueryType::AAAA,
+        DnsRecord::MX { .. } => QueryType::MX,
+        DnsRecord::NS { .. } => QueryType::NS,
+        DnsRecord::TXT { .. } => QueryType::TXT,
+        _ => panic!("unsupported record"),
+    };
+    buffer.write_u16(u16::from(qtype)).unwrap();
+    buffer.write_u16(1).unwrap();
+    record.write(&mut buffer).unwrap();
+    let len = buffer.pos();
+    buffer.set_len(len).unwrap();
+    buffer.as_slice().to_vec()
+}
 
 fn make_assignment(id: u64, kind: TaskKind) -> (LeaseAssignment, CancellationToken) {
     let lease = Lease {
@@ -173,6 +207,156 @@ worker_test!(worker_pool_recovers_from_panics, {
         assert!((1..=3).contains(id), "unexpected lease id {id} reported");
     }
 });
+
+#[tokio::test]
+async fn dns_worker_emits_record_observations() {
+    let udp = UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind udp socket");
+    let addr = udp.local_addr().expect("udp socket address");
+    let handled = Arc::new(AtomicUsize::new(0));
+    let udp_task = {
+        let handled = handled.clone();
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 2048];
+            loop {
+                let (len, peer) = udp.recv_from(&mut buf).await.expect("receive query");
+                let message = copy_into_packet(&buf[..len]);
+                let question = message.question.first().expect("dns question");
+                let ttl = match question.qtype {
+                    QueryType::A => 120,
+                    QueryType::AAAA => 240,
+                    QueryType::MX => 360,
+                    QueryType::NS => 480,
+                    QueryType::TXT => 600,
+                    _ => 0,
+                };
+                let response = match question.qtype {
+                    QueryType::A => make_response(
+                        message.header.id,
+                        &question.qname,
+                        DnsRecord::A {
+                            domain: question.qname.clone(),
+                            addr: Ipv4Addr::new(1, 2, 3, 4),
+                            ttl,
+                        },
+                    ),
+                    QueryType::AAAA => make_response(
+                        message.header.id,
+                        &question.qname,
+                        DnsRecord::AAAA {
+                            domain: question.qname.clone(),
+                            addr: Ipv6Addr::LOCALHOST,
+                            ttl,
+                        },
+                    ),
+                    QueryType::MX => make_response(
+                        message.header.id,
+                        &question.qname,
+                        DnsRecord::MX {
+                            domain: question.qname.clone(),
+                            preference: 10,
+                            exchange: "mail.example.com".to_string(),
+                            ttl,
+                        },
+                    ),
+                    QueryType::NS => make_response(
+                        message.header.id,
+                        &question.qname,
+                        DnsRecord::NS {
+                            domain: question.qname.clone(),
+                            host: "ns1.example.com".to_string(),
+                            ttl,
+                        },
+                    ),
+                    QueryType::TXT => make_response(
+                        message.header.id,
+                        &question.qname,
+                        DnsRecord::TXT {
+                            domain: question.qname.clone(),
+                            data: vec!["hello".to_string()],
+                            ttl,
+                        },
+                    ),
+                    _ => unreachable!(),
+                };
+                udp.send_to(&response, peer).await.expect("send response");
+                if handled.fetch_add(1, Ordering::SeqCst) + 1 == 5 {
+                    break;
+                }
+            }
+        })
+    };
+
+    let lease = Lease {
+        lease_id: 900,
+        task_id: 900,
+        kind: TaskKind::Dns,
+        lease_until_ms: 0,
+        spec: TaskSpec::Dns {
+            query: "records.example".into(),
+            server: Some(addr.to_string()),
+        },
+    };
+    let token = CancellationToken::new();
+    let assignment = LeaseAssignment::new(lease, token);
+
+    let worker = dns_agent::workers::DnsWorker::default();
+    let report = worker
+        .handle(assignment)
+        .await
+        .expect("dns worker completed");
+
+    udp_task.await.expect("udp task completes");
+
+    let (completed, cancelled) = report.into_parts();
+    assert!(cancelled.is_empty(), "dns lease should not be cancelled");
+    assert_eq!(completed.len(), 1, "expected a single completed lease");
+    let observations = &completed[0].observations;
+    let server_str = addr.to_string();
+
+    let find = |name: &str| -> &Observation {
+        observations
+            .iter()
+            .find(|obs| obs.name == name)
+            .unwrap_or_else(|| panic!("missing observation {name}"))
+    };
+
+    let a_record = find("dns_a_record");
+    assert_eq!(a_record.value["query"].as_str(), Some("records.example"));
+    assert_eq!(a_record.value["server"].as_str(), Some(server_str.as_str()));
+    assert_eq!(a_record.value["address"].as_str(), Some("1.2.3.4"));
+    assert_eq!(a_record.value["ttl"].as_u64(), Some(120));
+
+    let aaaa_record = find("dns_aaaa_record");
+    assert_eq!(aaaa_record.value["address"].as_str(), Some("::1"));
+    assert_eq!(aaaa_record.value["ttl"].as_u64(), Some(240));
+
+    let mx_record = find("dns_mx_record");
+    assert_eq!(
+        mx_record.value["exchange"].as_str(),
+        Some("mail.example.com")
+    );
+    assert_eq!(mx_record.value["preference"].as_u64(), Some(10));
+    assert_eq!(mx_record.value["ttl"].as_u64(), Some(360));
+
+    let ns_record = find("dns_ns_record");
+    assert_eq!(ns_record.value["host"].as_str(), Some("ns1.example.com"));
+    assert_eq!(ns_record.value["ttl"].as_u64(), Some(480));
+
+    let txt_record = find("dns_txt_record");
+    assert_eq!(
+        txt_record.value["data"].as_array().map(|arr| arr.len()),
+        Some(1)
+    );
+    assert_eq!(txt_record.value["data"][0].as_str(), Some("hello"));
+    assert_eq!(txt_record.value["ttl"].as_u64(), Some(600));
+
+    assert!(
+        observations.iter().all(|obs| obs.name != "dns_error"),
+        "successful resolution should not emit errors"
+    );
+}
 
 worker_test!(worker_reports_cancellation, {
     let dispatcher_config = DispatcherConfig::default();

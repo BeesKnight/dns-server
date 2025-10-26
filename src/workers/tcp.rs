@@ -327,7 +327,7 @@ async fn run_attempt(
 fn delay_for(index: usize) -> Duration {
     HAPPY_EYEBALLS_DELAY
         .checked_mul(index as u32)
-        .unwrap_or_else(|| HAPPY_EYEBALLS_DELAY)
+        .unwrap_or(HAPPY_EYEBALLS_DELAY)
 }
 
 async fn connect_once(address: SocketAddr, configurator: SocketConfigurator) -> io::Result<()> {

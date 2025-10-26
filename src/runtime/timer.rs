@@ -83,6 +83,12 @@ impl PartialOrd for ScheduledTimer {
     }
 }
 
+impl Default for TimerService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TimerService {
     /// Creates a new timer service and starts its background worker.
     pub fn new() -> Self {

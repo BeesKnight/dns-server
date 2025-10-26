@@ -84,7 +84,7 @@ impl TraceWorker {
 
 impl Default for TraceWorker {
     fn default() -> Self {
-        let engine: Arc<dyn TraceEngine> = Arc::new(SystemTraceEngine::default());
+        let engine: Arc<dyn TraceEngine> = Arc::new(SystemTraceEngine);
         Self::with_engine(engine)
     }
 }
@@ -598,7 +598,7 @@ pub fn build_udp_probe(flow: ParisFlowId) -> (Vec<u8>, u16) {
     use pnet_packet::udp::MutableUdpPacket;
 
     let mut buffer = vec![0u8; 8];
-    let source = 33434 + (flow.0 % 1000) as u16;
+    let source = 33434 + (flow.0 % 1000);
     let destination = 33434;
     {
         let mut packet = MutableUdpPacket::new(&mut buffer).expect("packet buffer");
@@ -614,7 +614,7 @@ pub fn build_tcp_probe(flow: ParisFlowId) -> (Vec<u8>, u16) {
     use pnet_packet::tcp::{MutableTcpPacket, TcpFlags};
 
     let mut buffer = vec![0u8; 20];
-    let source = 33434 + (flow.0 % 1000) as u16;
+    let source = 33434 + (flow.0 % 1000);
     let destination = 80;
     {
         let mut packet = MutableTcpPacket::new(&mut buffer).expect("packet buffer");

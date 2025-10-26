@@ -583,7 +583,7 @@ mod tests {
         controller.record_success(TaskKind::Dns, 1);
         controller.record_success(TaskKind::Dns, 1);
         let available = controller.available(TaskKind::Dns);
-        assert!(available >= 4 - 0, "window should grow towards ceiling");
+        assert!(available >= 4, "window should grow towards ceiling");
     }
 
     #[tokio::test]

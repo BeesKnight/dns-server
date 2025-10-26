@@ -476,29 +476,47 @@ impl Flags {
 impl From<u16> for Flags {
     fn from(value: u16) -> Self {
         Self {
-            response: (&value & 0x8000) != 0,
-            opcode: (((&value & 0x7800) >> 11) as u8).into(),
-            authoritative_answer: (&value & 0x0400) != 0,
-            truncated_message: (value & 0x200) != 0,
-
-            recursion_desired: (&value & 0x100) != 0,
-            recursion_available: (&value & 0x80) != 0,
-            z: ((&value & 0x5) >> 4) as u8,
-            rescode: (value & 0xF).into(),
+            response: (value & 0x8000) != 0,
+            opcode: (((value & 0x7800) >> 11) as u8).into(),
+            authoritative_answer: (value & 0x0400) != 0,
+            truncated_message: (value & 0x0200) != 0,
+            recursion_desired: (value & 0x0100) != 0,
+            recursion_available: (value & 0x0080) != 0,
+            z: ((value & 0x0070) >> 4) as u8,
+            rescode: (value & 0x000F).into(),
         }
     }
 }
 
 impl From<Flags> for u16 {
     fn from(value: Flags) -> Self {
-        value.into()
+        let mut bits = 0u16;
+        if value.response {
+            bits |= 0x8000;
+        }
+        let opcode: u16 = u8::from(value.opcode) as u16;
+        bits |= (opcode & 0x000F) << 11;
+        if value.authoritative_answer {
+            bits |= 0x0400;
+        }
+        if value.truncated_message {
+            bits |= 0x0200;
+        }
+        if value.recursion_desired {
+            bits |= 0x0100;
+        }
+        if value.recursion_available {
+            bits |= 0x0080;
+        }
+        bits |= (u16::from(value.z & 0x07)) << 4;
+        bits |= u16::from(value.rescode);
+        bits
     }
 }
 
 #[rustfmt::skip]
 #[derive(Debug, PartialEq, Copy, Clone)]
 #[repr(u8)]
-
 // попробовать вытаскивать по дискриминанту с ансейфом - смотреть обсидиан
 pub enum Opcode {
     Query,
@@ -557,12 +575,13 @@ pub enum ResultCode {
 impl From<u16> for ResultCode {
     fn from(num: u16) -> ResultCode {
         match num {
+            0 => ResultCode::NOERROR,
             1 => ResultCode::FORMERR,
             2 => ResultCode::SERVFAIL,
             3 => ResultCode::NXDOMAIN,
             4 => ResultCode::NOTIMP,
             5 => ResultCode::REFUSED,
-            0 | _ => ResultCode::NOERROR,
+            _ => ResultCode::NOERROR,
         }
     }
 }
@@ -887,11 +906,11 @@ mod test {
         let pars5d = Flags::from(payload);
         assert!(!pars5d.response);
         assert_eq!(pars5d.opcode, Opcode::Query);
-        assert_eq!(pars5d.authoritative_answer, false);
-        assert_eq!(pars5d.truncated_message, false);
+        assert!(!pars5d.authoritative_answer);
+        assert!(!pars5d.truncated_message);
 
-        assert_eq!(pars5d.recursion_desired, true);
-        assert_eq!(pars5d.recursion_available, false);
+        assert!(pars5d.recursion_desired);
+        assert!(!pars5d.recursion_available);
         assert_eq!(pars5d.z, 0);
         assert_eq!(pars5d.rescode, ResultCode::NOERROR);
     }

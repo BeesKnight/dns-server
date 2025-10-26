@@ -204,6 +204,466 @@ func TestReportRespJSONShape(t *testing.T) {
 	}
 }
 
+func TestHandleAgentsListReturnsAgents(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("start miniredis: %v", err)
+	}
+	defer mr.Close()
+
+	redisClient := redis.NewClient(&redis.Options{Addr: mr.Addr(), Protocol: 2})
+	defer redisClient.Close()
+
+	ctx := context.Background()
+	agentID := uuid.New()
+	now := time.Now().Add(-10 * time.Second)
+
+	override := agentSettings{Status: "error", Role: "resolver", Capabilities: []string{"dns", "http"}, Metadata: map[string]any{"note": "test"}}
+	raw, _ := json.Marshal(override)
+	if err := redisClient.Set(ctx, agentSettingsKey(agentID), raw, 0).Err(); err != nil {
+		t.Fatalf("seed redis: %v", err)
+	}
+
+	fp := &fakePool{}
+	fp.queryFn = func(_ context.Context, sql string, args ...any) (pgx.Rows, error) {
+		if strings.Contains(sql, "from agents") {
+			rows := [][]any{{
+				agentID,
+				int64(42),
+				"agent-one",
+				sql.NullString{String: "ru-msk", Valid: true},
+				sql.NullString{String: "1.2.3", Valid: true},
+				sql.NullString{String: "198.51.100.5", Valid: true},
+				sql.NullTime{Time: now, Valid: true},
+				true,
+				4,
+				now.Add(-time.Hour),
+			}}
+			return &sliceRows{rows: rows}, nil
+		}
+		return nil, fmt.Errorf("unexpected query: %s", sql)
+	}
+	fp.queryRowFn = func(_ context.Context, sql string, args ...any) pgx.Row {
+		switch {
+		case strings.Contains(sql, "count(1) from leases"):
+			return fakeRow{values: []any{int64(2)}}
+		case strings.Contains(sql, "from check_results"):
+			return fakeRow{values: []any{sql.NullString{String: "error", Valid: true}}}
+		default:
+			return fakeRow{err: fmt.Errorf("unexpected query: %s", sql)}
+		}
+	}
+
+	app := &App{cfg: Config{ClaimBlockMs: 20000, LeaseTTL: 90 * time.Second}, pool: fp, redis: redisClient}
+	req := httptest.NewRequest(http.MethodGet, "/v1/agents?status=error&page=1&pageSize=5", nil)
+	w := httptest.NewRecorder()
+	app.handleAgentsList(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Items []struct {
+			ID            string         `json:"id"`
+			Name          string         `json:"name"`
+			Role          string         `json:"role"`
+			Status        string         `json:"status"`
+			LastActiveAt  string         `json:"lastActiveAt"`
+			TasksInFlight int            `json:"tasksInFlight"`
+			Capabilities  []string       `json:"capabilities"`
+			Metadata      map[string]any `json:"metadata"`
+		} `json:"items"`
+		Total    int `json:"total"`
+		Page     int `json:"page"`
+		PageSize int `json:"pageSize"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode resp: %v", err)
+	}
+	if resp.Total != 1 {
+		t.Fatalf("expected total 1, got %d", resp.Total)
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("expected one agent, got %d", len(resp.Items))
+	}
+	agent := resp.Items[0]
+	if agent.Status != "error" {
+		t.Fatalf("unexpected status %q", agent.Status)
+	}
+	if agent.Role != "resolver" {
+		t.Fatalf("unexpected role %q", agent.Role)
+	}
+	if agent.TasksInFlight != 2 {
+		t.Fatalf("unexpected tasksInFlight %d", agent.TasksInFlight)
+	}
+	if len(agent.Capabilities) != 2 {
+		t.Fatalf("unexpected capabilities %#v", agent.Capabilities)
+	}
+	if agent.Metadata["note"] != "test" {
+		t.Fatalf("expected metadata note, got %#v", agent.Metadata)
+	}
+	if strings.TrimSpace(agent.LastActiveAt) == "" {
+		t.Fatalf("expected lastActiveAt value")
+	}
+}
+
+func TestHandleAgentGetReturnsAgent(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("start miniredis: %v", err)
+	}
+	defer mr.Close()
+
+	redisClient := redis.NewClient(&redis.Options{Addr: mr.Addr(), Protocol: 2})
+	defer redisClient.Close()
+
+	ctx := context.Background()
+	agentID := uuid.New()
+	override := agentSettings{Role: "runner", Metadata: map[string]any{"note": "get"}}
+	raw, _ := json.Marshal(override)
+	if err := redisClient.Set(ctx, agentSettingsKey(agentID), raw, 0).Err(); err != nil {
+		t.Fatalf("seed redis: %v", err)
+	}
+
+	now := time.Now().Add(-5 * time.Second)
+
+	fp := &fakePool{}
+	fp.queryRowFn = func(_ context.Context, sql string, args ...any) pgx.Row {
+		switch {
+		case strings.Contains(sql, "from agents"):
+			return fakeRow{values: []any{
+				agentID,
+				int64(7),
+				"agent-two",
+				sql.NullString{String: "ams", Valid: true},
+				sql.NullString{String: "2.0.0", Valid: true},
+				sql.NullString{String: "203.0.113.7", Valid: true},
+				sql.NullTime{Time: now, Valid: true},
+				true,
+				3,
+				now.Add(-time.Hour),
+			}}
+		case strings.Contains(sql, "count(1) from leases"):
+			return fakeRow{values: []any{int64(0)}}
+		case strings.Contains(sql, "from check_results"):
+			return fakeRow{err: pgx.ErrNoRows}
+		default:
+			return fakeRow{err: fmt.Errorf("unexpected query: %s", sql)}
+		}
+	}
+
+	app := &App{cfg: Config{ClaimBlockMs: 20000, LeaseTTL: 90 * time.Second}, pool: fp, redis: redisClient}
+	req := httptest.NewRequest(http.MethodGet, "/v1/agents/"+agentID.String(), nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", agentID.String())
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+	app.handleAgentGet(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp agentDTO
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode resp: %v", err)
+	}
+	if resp.ID != agentID.String() {
+		t.Fatalf("unexpected id %q", resp.ID)
+	}
+	if resp.Name != "agent-two" {
+		t.Fatalf("unexpected name %q", resp.Name)
+	}
+	if resp.Metadata["note"] != "get" {
+		t.Fatalf("expected metadata note, got %#v", resp.Metadata)
+	}
+}
+
+func TestHandleAgentPatchUpdatesSettings(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("start miniredis: %v", err)
+	}
+	defer mr.Close()
+
+	redisClient := redis.NewClient(&redis.Options{Addr: mr.Addr(), Protocol: 2})
+	defer redisClient.Close()
+
+	ctx := context.Background()
+	agentID := uuid.New()
+	if err := redisClient.Set(ctx, agentSettingsKey(agentID), `{"role":"runner"}`, 0).Err(); err != nil {
+		t.Fatalf("seed redis: %v", err)
+	}
+
+	now := time.Now().Add(-30 * time.Second)
+
+	fp := &fakePool{}
+	fp.queryRowFn = func(_ context.Context, sql string, args ...any) pgx.Row {
+		switch {
+		case strings.Contains(sql, "from agents"):
+			return fakeRow{values: []any{
+				agentID,
+				int64(9),
+				"agent-three",
+				sql.NullString{String: "nyc", Valid: true},
+				sql.NullString{String: "3.1.4", Valid: true},
+				sql.NullString{String: "198.51.100.20", Valid: true},
+				sql.NullTime{Time: now, Valid: true},
+				true,
+				5,
+				now.Add(-2 * time.Hour),
+			}}
+		case strings.Contains(sql, "count(1) from leases"):
+			return fakeRow{values: []any{int64(0)}}
+		case strings.Contains(sql, "from check_results"):
+			return fakeRow{err: pgx.ErrNoRows}
+		default:
+			return fakeRow{err: fmt.Errorf("unexpected query: %s", sql)}
+		}
+	}
+
+	var updatedName string
+	fp.execFn = func(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+		if !strings.Contains(sql, "update agents set name") {
+			return pgconn.NewCommandTag(""), fmt.Errorf("unexpected exec: %s", sql)
+		}
+		updatedName, _ = args[0].(string)
+		return pgconn.NewCommandTag("UPDATE 1"), nil
+	}
+
+	app := &App{cfg: Config{ClaimBlockMs: 20000, LeaseTTL: 90 * time.Second}, pool: fp, redis: redisClient}
+	body := bytes.NewBufferString(`{"name":"Agent Patched","status":"idle","capabilities":["dns","","http","dns"],"metadata":{"note":"patched"}}`)
+	req := httptest.NewRequest(http.MethodPatch, "/v1/agents/"+agentID.String(), body)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", agentID.String())
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+	app.handleAgentPatch(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d: %s", w.Code, w.Body.String())
+	}
+	if updatedName != "Agent Patched" {
+		t.Fatalf("expected name update, got %q", updatedName)
+	}
+
+	rawSettings, err := redisClient.Get(ctx, agentSettingsKey(agentID)).Result()
+	if err != nil {
+		t.Fatalf("fetch redis: %v", err)
+	}
+	var stored agentSettings
+	if err := json.Unmarshal([]byte(rawSettings), &stored); err != nil {
+		t.Fatalf("decode settings: %v", err)
+	}
+	if stored.Status != "idle" {
+		t.Fatalf("unexpected stored status %q", stored.Status)
+	}
+	if len(stored.Capabilities) != 2 {
+		t.Fatalf("unexpected stored capabilities %#v", stored.Capabilities)
+	}
+	if stored.Metadata["note"] != "patched" {
+		t.Fatalf("unexpected stored metadata %#v", stored.Metadata)
+	}
+
+	var resp agentDTO
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode resp: %v", err)
+	}
+	if resp.Name != "Agent Patched" {
+		t.Fatalf("unexpected response name %q", resp.Name)
+	}
+	if resp.Status != "idle" {
+		t.Fatalf("unexpected response status %q", resp.Status)
+	}
+}
+
+func TestHandleAgentDeleteClearsSettings(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("start miniredis: %v", err)
+	}
+	defer mr.Close()
+
+	redisClient := redis.NewClient(&redis.Options{Addr: mr.Addr(), Protocol: 2})
+	defer redisClient.Close()
+
+	ctx := context.Background()
+	agentID := uuid.New()
+	if err := redisClient.Set(ctx, agentSettingsKey(agentID), `{"status":"busy"}`, 0).Err(); err != nil {
+		t.Fatalf("seed redis: %v", err)
+	}
+
+	now := time.Now().Add(-time.Minute)
+
+	fp := &fakePool{}
+	fp.queryRowFn = func(_ context.Context, sql string, args ...any) pgx.Row {
+		if !strings.Contains(sql, "from agents") {
+			return fakeRow{err: fmt.Errorf("unexpected query: %s", sql)}
+		}
+		return fakeRow{values: []any{
+			agentID,
+			int64(5),
+			"agent-del",
+			sql.NullString{String: "fra", Valid: true},
+			sql.NullString{String: "1.0", Valid: true},
+			sql.NullString{String: "192.0.2.10", Valid: true},
+			sql.NullTime{Time: now, Valid: true},
+			true,
+			2,
+			now.Add(-2 * time.Hour),
+		}}
+	}
+	var execCalled bool
+	fp.execFn = func(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+		if !strings.Contains(sql, "update agents set is_active=false") {
+			return pgconn.NewCommandTag(""), fmt.Errorf("unexpected exec: %s", sql)
+		}
+		execCalled = true
+		return pgconn.NewCommandTag("UPDATE 1"), nil
+	}
+
+	app := &App{pool: fp, redis: redisClient}
+	req := httptest.NewRequest(http.MethodDelete, "/v1/agents/"+agentID.String(), nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", agentID.String())
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+	app.handleAgentDelete(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d: %s", w.Code, w.Body.String())
+	}
+	if !execCalled {
+		t.Fatalf("expected exec to be called")
+	}
+	if redisClient.Exists(ctx, agentSettingsKey(agentID)).Val() != 0 {
+		t.Fatalf("expected redis settings to be cleared")
+	}
+	var resp map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode resp: %v", err)
+	}
+	if resp["id"] != agentID.String() {
+		t.Fatalf("unexpected response id %q", resp["id"])
+	}
+}
+
+func TestHandleAgentTasksReturnsTasks(t *testing.T) {
+	agentID := uuid.New()
+	now := time.Now()
+
+	fp := &fakePool{}
+	fp.queryRowFn = func(_ context.Context, sql string, args ...any) pgx.Row {
+		switch {
+		case strings.Contains(sql, "from agents"):
+			return fakeRow{values: []any{
+				agentID,
+				int64(11),
+				"agent-tasks",
+				sql.NullString{String: "hel", Valid: true},
+				sql.NullString{String: "1.0", Valid: true},
+				sql.NullString{String: "203.0.113.9", Valid: true},
+				sql.NullTime{Time: now.Add(-2 * time.Minute), Valid: true},
+				true,
+				3,
+				now.Add(-3 * time.Hour),
+			}}
+		case strings.Contains(sql, "count(1) from check_results"):
+			return fakeRow{values: []any{int64(2)}}
+		default:
+			return fakeRow{err: fmt.Errorf("unexpected query: %s", sql)}
+		}
+	}
+	fp.queryFn = func(_ context.Context, sql string, args ...any) (pgx.Rows, error) {
+		switch {
+		case strings.Contains(sql, "from leases"):
+			rows := [][]any{{
+				uuid.New(),
+				uuid.New(),
+				"dns",
+				[]byte(`{"host":"example.org"}`),
+				now.Add(-4 * time.Minute),
+				now.Add(-4 * time.Minute),
+				sql.NullTime{Time: now.Add(-3 * time.Minute), Valid: true},
+			}}
+			return &sliceRows{rows: rows}, nil
+		case strings.Contains(sql, "from check_results"):
+			rows := [][]any{
+				{
+					uuid.New(),
+					uuid.New(),
+					"http",
+					"ok",
+					[]byte(`{"host":"example.org"}`),
+					[]byte(`{"latency":100}`),
+					now.Add(-2 * time.Minute),
+					now.Add(-6 * time.Minute),
+					sql.NullTime{Time: now.Add(-5 * time.Minute), Valid: true},
+					sql.NullTime{Time: now.Add(-2 * time.Minute), Valid: true},
+				},
+				{
+					uuid.New(),
+					uuid.New(),
+					"dns",
+					"error",
+					[]byte(`{"error":"timeout"}`),
+					[]byte(`{"retries":1}`),
+					now.Add(-30 * time.Second),
+					now.Add(-10 * time.Minute),
+					sql.NullTime{Time: now.Add(-9 * time.Minute), Valid: true},
+					sql.NullTime{Time: now.Add(-30 * time.Second), Valid: true},
+				},
+			}
+			return &sliceRows{rows: rows}, nil
+		default:
+			return nil, fmt.Errorf("unexpected query: %s", sql)
+		}
+	}
+
+	app := &App{cfg: Config{ClaimBlockMs: 20000, LeaseTTL: 90 * time.Second}, pool: fp}
+	req := httptest.NewRequest(http.MethodGet, "/v1/agents/"+agentID.String()+"/tasks?page=1&pageSize=10", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", agentID.String())
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+	app.handleAgentTasks(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Items []struct {
+			Status  string `json:"status"`
+			Error   string `json:"error"`
+			AgentID string `json:"agentId"`
+		} `json:"items"`
+		Total int `json:"total"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode resp: %v", err)
+	}
+	if resp.Total != 3 {
+		t.Fatalf("expected total 3, got %d", resp.Total)
+	}
+	statuses := map[string]bool{}
+	for _, item := range resp.Items {
+		statuses[item.Status] = true
+		if item.AgentID != agentID.String() {
+			t.Fatalf("unexpected agent id %q", item.AgentID)
+		}
+		if item.Status == "failed" && strings.TrimSpace(item.Error) == "" {
+			t.Fatalf("expected error message for failed task")
+		}
+	}
+	for _, expected := range []string{"running", "completed", "failed"} {
+		if !statuses[expected] {
+			t.Fatalf("expected status %q in response", expected)
+		}
+	}
+}
+
 func TestObservationsPayloadNormalizes(t *testing.T) {
 	unit := "ms"
 	payload := observationsPayload([]reportObservation{{Name: "latency", Value: nil, Unit: &unit}})
@@ -677,6 +1137,12 @@ func (r fakeRow) Scan(dest ...any) error {
 				return fmt.Errorf("value %d has type %T", i, r.values[i])
 			}
 			*ptr = v
+		case *bool:
+			v, ok := r.values[i].(bool)
+			if !ok {
+				return fmt.Errorf("value %d has type %T", i, r.values[i])
+			}
+			*ptr = v
 		case *int:
 			switch v := r.values[i].(type) {
 			case int:
@@ -717,6 +1183,21 @@ func (r fakeRow) Scan(dest ...any) error {
 				return fmt.Errorf("value %d has type %T", i, r.values[i])
 			}
 			*ptr = v
+		case *sql.NullTime:
+			v, ok := r.values[i].(sql.NullTime)
+			if !ok {
+				return fmt.Errorf("value %d has type %T", i, r.values[i])
+			}
+			*ptr = v
+		case *[]byte:
+			switch v := r.values[i].(type) {
+			case []byte:
+				*ptr = append((*ptr)[:0], v...)
+			case string:
+				*ptr = append((*ptr)[:0], []byte(v)...)
+			default:
+				return fmt.Errorf("value %d has type %T", i, r.values[i])
+			}
 		default:
 			return fmt.Errorf("unsupported dest type %T", d)
 		}
@@ -791,6 +1272,35 @@ func (r *fakeRows) RawValues() [][]byte {
 }
 
 func (r *fakeRows) Conn() *pgx.Conn { return nil }
+
+type sliceRows struct {
+	rows [][]any
+	idx  int
+}
+
+func (r *sliceRows) Close() {}
+
+func (r *sliceRows) Err() error { return nil }
+
+func (r *sliceRows) CommandTag() pgconn.CommandTag { return pgconn.NewCommandTag("SELECT 0") }
+
+func (r *sliceRows) FieldDescriptions() []pgconn.FieldDescription { return nil }
+
+func (r *sliceRows) Next() bool {
+	if r.idx < len(r.rows) {
+		r.idx++
+		return true
+	}
+	return false
+}
+
+func (r *sliceRows) Scan(dest ...any) error {
+	if r.idx == 0 || r.idx > len(r.rows) {
+		return fmt.Errorf("scan called with no current row")
+	}
+	fake := fakeRow{values: r.rows[r.idx-1]}
+	return fake.Scan(dest...)
+}
 
 type fakeCityDB struct {
 	record *geoip2.City

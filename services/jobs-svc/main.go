@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -186,6 +187,13 @@ func main() {
 
 	// агенты
 	r.Route("/v1/agents", func(rt chi.Router) {
+		rt.Get("/", app.handleAgentsList)
+		rt.Route("/{id}", func(sr chi.Router) {
+			sr.Get("/", app.handleAgentGet)
+			sr.Patch("/", app.handleAgentPatch)
+			sr.Delete("/", app.handleAgentDelete)
+			sr.Get("/tasks", app.handleAgentTasks)
+		})
 		rt.Post("/register", app.handleAgentRegister)
 		rt.With(app.requireAgent).Post("/heartbeat", app.handleHeartbeat)
 		rt.With(app.requireAgent).Post("/claim", app.handleClaim)
@@ -856,6 +864,846 @@ func (a *App) handleReport(w http.ResponseWriter, r *http.Request) {
 	process(req.Cancelled, "cancelled")
 
 	_ = json.NewEncoder(w).Encode(reportResp{Acknowledged: acknowledged})
+}
+
+/*************** Agents REST (control plane) ***************/
+type agentDTO struct {
+	ID            string         `json:"id"`
+	Name          string         `json:"name"`
+	Role          string         `json:"role"`
+	Status        string         `json:"status"`
+	LastActiveAt  time.Time      `json:"lastActiveAt"`
+	TasksInFlight int            `json:"tasksInFlight"`
+	Capabilities  []string       `json:"capabilities"`
+	Metadata      map[string]any `json:"metadata,omitempty"`
+}
+
+type pagedAgentsResponse struct {
+	Items    []agentDTO `json:"items"`
+	Total    int        `json:"total"`
+	Page     int        `json:"page"`
+	PageSize int        `json:"pageSize"`
+}
+
+type agentSettings struct {
+	Role         string         `json:"role,omitempty"`
+	Status       string         `json:"status,omitempty"`
+	Capabilities []string       `json:"capabilities,omitempty"`
+	Metadata     map[string]any `json:"metadata,omitempty"`
+}
+
+type agentRecord struct {
+	ID          uuid.UUID
+	ExternalID  int64
+	Name        string
+	Location    sql.NullString
+	Version     sql.NullString
+	AgentIP     sql.NullString
+	LastSeen    sql.NullTime
+	IsActive    bool
+	MaxParallel int
+	CreatedAt   time.Time
+}
+
+type taskSummaryDTO struct {
+	ID         string     `json:"id"`
+	AgentID    string     `json:"agentId"`
+	Title      string     `json:"title"`
+	Status     string     `json:"status"`
+	Progress   int        `json:"progress"`
+	QueuedAt   time.Time  `json:"queuedAt"`
+	StartedAt  *time.Time `json:"startedAt,omitempty"`
+	FinishedAt *time.Time `json:"finishedAt,omitempty"`
+	Error      string     `json:"error,omitempty"`
+}
+
+type pagedTasksResponse struct {
+	Items    []taskSummaryDTO `json:"items"`
+	Total    int              `json:"total"`
+	Page     int              `json:"page"`
+	PageSize int              `json:"pageSize"`
+}
+
+var allowedAgentStatuses = map[string]struct{}{
+	"idle":    {},
+	"busy":    {},
+	"offline": {},
+	"error":   {},
+}
+
+var (
+	errAgentNotFound = errors.New("agent not found")
+	errBadAgentID    = errors.New("bad agent id")
+)
+
+func agentSettingsKey(id uuid.UUID) string { return "agent:settings:" + id.String() }
+
+func parseQueryInt(raw string, def, min, max int) int {
+	val := def
+	if v, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil {
+		val = v
+	}
+	if val < min {
+		val = min
+	}
+	if max > 0 && val > max {
+		val = max
+	}
+	return val
+}
+
+func sanitizeCapabilities(src []string) []string {
+	if len(src) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(src))
+	out := make([]string, 0, len(src))
+	for _, item := range src {
+		trimmed := strings.TrimSpace(item)
+		if trimmed == "" {
+			continue
+		}
+		key := strings.ToLower(trimmed)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, trimmed)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func sanitizeMetadata(src map[string]any) map[string]any {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(map[string]any, len(src))
+	for k, v := range src {
+		key := strings.TrimSpace(k)
+		if key == "" {
+			continue
+		}
+		dst[key] = v
+	}
+	if len(dst) == 0 {
+		return nil
+	}
+	return dst
+}
+
+func mergeMetadata(base map[string]any, extra map[string]any) map[string]any {
+	if len(base) == 0 && len(extra) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(base)+len(extra))
+	for k, v := range base {
+		out[k] = v
+	}
+	for k, v := range extra {
+		out[k] = v
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func (s *agentSettings) normalize() {
+	if s == nil {
+		return
+	}
+	s.Role = strings.TrimSpace(s.Role)
+	s.Status = strings.ToLower(strings.TrimSpace(s.Status))
+	if len(s.Capabilities) > 0 {
+		s.Capabilities = sanitizeCapabilities(s.Capabilities)
+	}
+	s.Metadata = sanitizeMetadata(s.Metadata)
+}
+
+func (s *agentSettings) isZero() bool {
+	if s == nil {
+		return true
+	}
+	if strings.TrimSpace(s.Role) != "" {
+		return false
+	}
+	if strings.TrimSpace(s.Status) != "" {
+		return false
+	}
+	if len(s.Capabilities) > 0 {
+		return false
+	}
+	if len(s.Metadata) > 0 {
+		return false
+	}
+	return true
+}
+
+func isHealthyStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "ok", "done", "success", "cancelled", "canceled":
+		return true
+	default:
+		return false
+	}
+}
+
+func (a *App) getAgentSettings(ctx context.Context, id uuid.UUID) (*agentSettings, error) {
+	if a.redis == nil {
+		return nil, nil
+	}
+	raw, err := a.redis.Get(ctx, agentSettingsKey(id)).Result()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	var settings agentSettings
+	if err := json.Unmarshal([]byte(raw), &settings); err != nil {
+		return nil, err
+	}
+	settings.normalize()
+	if settings.isZero() {
+		return nil, nil
+	}
+	return &settings, nil
+}
+
+func (a *App) saveAgentSettings(ctx context.Context, id uuid.UUID, settings *agentSettings) error {
+	if a.redis == nil {
+		return nil
+	}
+	if settings != nil {
+		settings.normalize()
+	}
+	if settings == nil || settings.isZero() {
+		return a.redis.Del(ctx, agentSettingsKey(id)).Err()
+	}
+	payload, err := json.Marshal(settings)
+	if err != nil {
+		return err
+	}
+	return a.redis.Set(ctx, agentSettingsKey(id), payload, 0).Err()
+}
+
+func (a *App) deleteAgentSettings(ctx context.Context, id uuid.UUID) error {
+	if a.redis == nil {
+		return nil
+	}
+	return a.redis.Del(ctx, agentSettingsKey(id)).Err()
+}
+
+const agentSelectColumns = `select id, external_id, name, location, version, agent_ip::text, last_seen, is_active, max_parallel, created_at from agents`
+
+func scanAgentRecord(row pgx.Row) (*agentRecord, error) {
+	var rec agentRecord
+	if err := row.Scan(&rec.ID, &rec.ExternalID, &rec.Name, &rec.Location, &rec.Version, &rec.AgentIP, &rec.LastSeen, &rec.IsActive, &rec.MaxParallel, &rec.CreatedAt); err != nil {
+		return nil, err
+	}
+	return &rec, nil
+}
+
+func (a *App) findAgentRecord(ctx context.Context, rawID string) (*agentRecord, error) {
+	raw := strings.TrimSpace(rawID)
+	if raw == "" {
+		return nil, errBadAgentID
+	}
+	if uid, err := uuid.Parse(raw); err == nil {
+		row := a.pool.QueryRow(ctx, agentSelectColumns+" where id=$1", uid)
+		rec, serr := scanAgentRecord(row)
+		if serr != nil {
+			if errors.Is(serr, pgx.ErrNoRows) {
+				return nil, errAgentNotFound
+			}
+			return nil, serr
+		}
+		return rec, nil
+	}
+	num, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return nil, errBadAgentID
+	}
+	row := a.pool.QueryRow(ctx, agentSelectColumns+" where external_id=$1", num)
+	rec, serr := scanAgentRecord(row)
+	if serr != nil {
+		if errors.Is(serr, pgx.ErrNoRows) {
+			return nil, errAgentNotFound
+		}
+		return nil, serr
+	}
+	return rec, nil
+}
+
+func (a *App) describeAgent(ctx context.Context, rec agentRecord, settings *agentSettings) (agentDTO, error) {
+	dto := agentDTO{ID: rec.ID.String(), Name: rec.Name}
+	lastActive := rec.CreatedAt
+	if rec.LastSeen.Valid {
+		lastActive = rec.LastSeen.Time
+	}
+	lastActive = lastActive.UTC()
+
+	var active int64
+	if err := a.pool.QueryRow(ctx, `select count(1) from leases where agent_id=$1 and leased_until>now()`, rec.ID).Scan(&active); err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return agentDTO{}, err
+		}
+		active = 0
+	}
+
+	var lastStatus sql.NullString
+	if err := a.pool.QueryRow(ctx,
+		`select status from check_results where metrics->>'agent_id'=$1 order by created_at desc limit 1`,
+		rec.ID.String()).Scan(&lastStatus); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return agentDTO{}, err
+	}
+
+	meta := map[string]any{"external_id": rec.ExternalID, "max_parallel": rec.MaxParallel}
+	if rec.Location.Valid && strings.TrimSpace(rec.Location.String) != "" {
+		meta["location"] = strings.TrimSpace(rec.Location.String)
+	}
+	if rec.Version.Valid && strings.TrimSpace(rec.Version.String) != "" {
+		meta["version"] = strings.TrimSpace(rec.Version.String)
+	}
+	if rec.AgentIP.Valid && strings.TrimSpace(rec.AgentIP.String) != "" {
+		meta["ip"] = strings.TrimSpace(rec.AgentIP.String)
+	}
+
+	role := "runner"
+	status := "idle"
+	if settings != nil {
+		if settings.Role != "" {
+			role = settings.Role
+		}
+		if settings.Status != "" {
+			status = settings.Status
+		}
+	}
+
+	if settings == nil || settings.Status == "" {
+		offlineAfter := a.heartbeatTimeout() * 2
+		if offlineAfter <= 0 {
+			offlineAfter = time.Minute
+		}
+		now := time.Now()
+		if !rec.IsActive || now.Sub(lastActive) > offlineAfter {
+			status = "offline"
+		} else if lastStatus.Valid && !isHealthyStatus(lastStatus.String) {
+			status = "error"
+		} else if active > 0 {
+			status = "busy"
+		} else {
+			status = "idle"
+		}
+	}
+
+	dto.Role = role
+	dto.Status = status
+	dto.LastActiveAt = lastActive
+	dto.TasksInFlight = int(active)
+
+	capabilities := []string{}
+	if settings != nil && len(settings.Capabilities) > 0 {
+		capabilities = sanitizeCapabilities(settings.Capabilities)
+	}
+	if capabilities == nil {
+		capabilities = []string{}
+	}
+	dto.Capabilities = capabilities
+
+	merged := mergeMetadata(meta, nil)
+	if settings != nil && len(settings.Metadata) > 0 {
+		merged = mergeMetadata(merged, settings.Metadata)
+	}
+	if len(merged) > 0 {
+		dto.Metadata = merged
+	}
+
+	return dto, nil
+}
+
+func respondAgentError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, errBadAgentID):
+		http.Error(w, "bad agent id", http.StatusBadRequest)
+	case errors.Is(err, errAgentNotFound), errors.Is(err, pgx.ErrNoRows):
+		http.Error(w, "not found", http.StatusNotFound)
+	default:
+		http.Error(w, "db error", http.StatusInternalServerError)
+	}
+}
+
+func (a *App) handleAgentsList(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	ctx := r.Context()
+	q := r.URL.Query()
+	search := strings.TrimSpace(q.Get("search"))
+	statusFilter := strings.ToLower(strings.TrimSpace(q.Get("status")))
+	page := parseQueryInt(q.Get("page"), 1, 1, 1000)
+	pageSize := parseQueryInt(q.Get("pageSize"), 50, 1, 500)
+
+	args := []any{}
+	query := agentSelectColumns
+	if search != "" {
+		args = append(args, "%"+strings.ToLower(search)+"%")
+		query += ` where lower(name) like $1 or lower(coalesce(location,'')) like $1 or lower(coalesce(version,'')) like $1 or cast(external_id as text) like $1 or lower(coalesce(agent_ip::text,'')) like $1`
+	}
+	query += " order by coalesce(last_seen, created_at) desc"
+
+	rows, err := a.pool.Query(ctx, query, args...)
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	var records []agentRecord
+	for rows.Next() {
+		var rec agentRecord
+		if err := rows.Scan(&rec.ID, &rec.ExternalID, &rec.Name, &rec.Location, &rec.Version, &rec.AgentIP, &rec.LastSeen, &rec.IsActive, &rec.MaxParallel, &rec.CreatedAt); err != nil {
+			http.Error(w, "db error", http.StatusInternalServerError)
+			return
+		}
+		records = append(records, rec)
+	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+
+	agents := make([]agentDTO, 0, len(records))
+	for _, rec := range records {
+		settings, serr := a.getAgentSettings(ctx, rec.ID)
+		if serr != nil {
+			http.Error(w, "settings error", http.StatusInternalServerError)
+			return
+		}
+		dto, derr := a.describeAgent(ctx, rec, settings)
+		if derr != nil {
+			http.Error(w, "db error", http.StatusInternalServerError)
+			return
+		}
+		if statusFilter != "" && dto.Status != statusFilter {
+			continue
+		}
+		agents = append(agents, dto)
+	}
+
+	sort.Slice(agents, func(i, j int) bool {
+		if agents[i].LastActiveAt.Equal(agents[j].LastActiveAt) {
+			return agents[i].ID < agents[j].ID
+		}
+		return agents[i].LastActiveAt.After(agents[j].LastActiveAt)
+	})
+
+	total := len(agents)
+	start := (page - 1) * pageSize
+	if start > total {
+		start = total
+	}
+	end := start + pageSize
+	if end > total {
+		end = total
+	}
+	paged := agents[start:end]
+
+	resp := pagedAgentsResponse{Items: paged, Total: total, Page: page, PageSize: pageSize}
+	if resp.Items == nil {
+		resp.Items = []agentDTO{}
+	}
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func (a *App) handleAgentGet(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	ctx := r.Context()
+	rec, err := a.findAgentRecord(ctx, chi.URLParam(r, "id"))
+	if err != nil {
+		respondAgentError(w, err)
+		return
+	}
+	settings, serr := a.getAgentSettings(ctx, rec.ID)
+	if serr != nil {
+		http.Error(w, "settings error", http.StatusInternalServerError)
+		return
+	}
+	dto, derr := a.describeAgent(ctx, *rec, settings)
+	if derr != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(dto)
+}
+
+type agentPatchRequest struct {
+	Name         *string         `json:"name"`
+	Role         *string         `json:"role"`
+	Status       *string         `json:"status"`
+	Capabilities *[]string       `json:"capabilities"`
+	Metadata     *map[string]any `json:"metadata"`
+}
+
+func (a *App) handleAgentPatch(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	ctx := r.Context()
+	rec, err := a.findAgentRecord(ctx, chi.URLParam(r, "id"))
+	if err != nil {
+		respondAgentError(w, err)
+		return
+	}
+	var req agentPatchRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+
+	if req.Name != nil {
+		name := strings.TrimSpace(*req.Name)
+		if name == "" {
+			http.Error(w, "name required", http.StatusBadRequest)
+			return
+		}
+		if _, err := a.pool.Exec(ctx, `update agents set name=$1 where id=$2`, name, rec.ID); err != nil {
+			http.Error(w, "db error", http.StatusInternalServerError)
+			return
+		}
+		rec.Name = name
+	}
+
+	settings, serr := a.getAgentSettings(ctx, rec.ID)
+	if serr != nil {
+		http.Error(w, "settings error", http.StatusInternalServerError)
+		return
+	}
+	if settings == nil {
+		settings = &agentSettings{}
+	}
+
+	if req.Role != nil {
+		settings.Role = strings.TrimSpace(*req.Role)
+	}
+	if req.Status != nil {
+		status := strings.ToLower(strings.TrimSpace(*req.Status))
+		if status != "" {
+			if _, ok := allowedAgentStatuses[status]; !ok {
+				http.Error(w, "bad status", http.StatusBadRequest)
+				return
+			}
+			settings.Status = status
+		} else {
+			settings.Status = ""
+		}
+	}
+	if req.Capabilities != nil {
+		settings.Capabilities = sanitizeCapabilities(*req.Capabilities)
+	}
+	if req.Metadata != nil {
+		if *req.Metadata == nil {
+			settings.Metadata = nil
+		} else {
+			settings.Metadata = sanitizeMetadata(*req.Metadata)
+		}
+	}
+
+	if err := a.saveAgentSettings(ctx, rec.ID, settings); err != nil {
+		http.Error(w, "settings error", http.StatusInternalServerError)
+		return
+	}
+
+	var dto agentDTO
+	dto, err = a.describeAgent(ctx, *rec, settings)
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(dto)
+}
+
+func (a *App) handleAgentDelete(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	ctx := r.Context()
+	rec, err := a.findAgentRecord(ctx, chi.URLParam(r, "id"))
+	if err != nil {
+		respondAgentError(w, err)
+		return
+	}
+	if _, err := a.pool.Exec(ctx, `update agents set is_active=false where id=$1`, rec.ID); err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+	if err := a.deleteAgentSettings(ctx, rec.ID); err != nil {
+		http.Error(w, "settings error", http.StatusInternalServerError)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"id": rec.ID.String()})
+}
+
+func resultStatusFiltersFor(filter string) []string {
+	switch filter {
+	case "completed":
+		return []string{"ok", "done", "success"}
+	case "failed":
+		return []string{"error", "failed", "timeout"}
+	case "cancelled":
+		return []string{"cancelled", "canceled"}
+	case "running":
+		return []string{"running"}
+	case "queued":
+		return []string{"queued"}
+	case "paused":
+		return []string{"paused"}
+	default:
+		return nil
+	}
+}
+
+func mapResultStatus(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "ok", "done", "success":
+		return "completed"
+	case "cancelled", "canceled":
+		return "cancelled"
+	case "running":
+		return "running"
+	case "queued":
+		return "queued"
+	case "paused":
+		return "paused"
+	default:
+		return "failed"
+	}
+}
+
+func progressForStatus(status string) int {
+	switch status {
+	case "completed", "failed", "cancelled":
+		return 100
+	case "running":
+		return 0
+	case "queued":
+		return 0
+	default:
+		return 0
+	}
+}
+
+func deriveTaskTitle(kind string, raw []byte) string {
+	label := strings.TrimSpace(kind)
+	if label == "" {
+		label = "task"
+	}
+	if len(raw) > 0 {
+		var payload map[string]any
+		if json.Unmarshal(raw, &payload) == nil {
+			for _, key := range []string{"title", "host", "hostname", "query", "domain", "target"} {
+				if val, ok := payload[key].(string); ok {
+					trimmed := strings.TrimSpace(val)
+					if trimmed != "" {
+						return strings.ToUpper(label) + " " + trimmed
+					}
+				}
+			}
+		}
+	}
+	return strings.ToUpper(label)
+}
+
+func extractErrorMessage(payload []byte, metrics []byte) string {
+	for _, raw := range [][]byte{payload, metrics} {
+		if len(raw) == 0 {
+			continue
+		}
+		var data map[string]any
+		if json.Unmarshal(raw, &data) != nil {
+			continue
+		}
+		for _, key := range []string{"error", "message", "details"} {
+			if val, ok := data[key].(string); ok {
+				trimmed := strings.TrimSpace(val)
+				if trimmed != "" {
+					return trimmed
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func (a *App) handleAgentTasks(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	ctx := r.Context()
+	rec, err := a.findAgentRecord(ctx, chi.URLParam(r, "id"))
+	if err != nil {
+		respondAgentError(w, err)
+		return
+	}
+
+	q := r.URL.Query()
+	page := parseQueryInt(q.Get("page"), 1, 1, 1000)
+	pageSize := parseQueryInt(q.Get("pageSize"), 20, 1, 200)
+	statusFilter := strings.ToLower(strings.TrimSpace(q.Get("status")))
+
+	includeRunning := statusFilter == "" || statusFilter == "running"
+	runningTasks := []taskSummaryDTO{}
+	if includeRunning {
+		rows, err := a.pool.Query(ctx,
+			`select l.task_id, l.check_id, l.kind, l.spec, l.created_at, c.created_at, c.started_at
+                           from leases l
+                           join checks c on c.id = l.check_id
+                          where l.agent_id=$1 and l.leased_until>now()
+                          order by c.created_at desc`, rec.ID)
+		if err != nil {
+			http.Error(w, "db error", http.StatusInternalServerError)
+			return
+		}
+		for rows.Next() {
+			var taskID uuid.UUID
+			var kind string
+			var spec []byte
+			var leaseCreated time.Time
+			var checkCreated time.Time
+			var started sql.NullTime
+			if err := rows.Scan(&taskID, new(uuid.UUID), &kind, &spec, &leaseCreated, &checkCreated, &started); err != nil {
+				rows.Close()
+				http.Error(w, "db error", http.StatusInternalServerError)
+				return
+			}
+			queuedAt := checkCreated
+			if queuedAt.IsZero() {
+				queuedAt = leaseCreated
+			}
+			dto := taskSummaryDTO{
+				ID:        taskID.String(),
+				AgentID:   rec.ID.String(),
+				Title:     deriveTaskTitle(kind, spec),
+				Status:    "running",
+				Progress:  progressForStatus("running"),
+				QueuedAt:  queuedAt.UTC(),
+				StartedAt: nullTimePtr(started),
+			}
+			runningTasks = append(runningTasks, dto)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			http.Error(w, "db error", http.StatusInternalServerError)
+			return
+		}
+		rows.Close()
+	}
+
+	queryResults := statusFilter == "" || statusFilter != "running"
+	resultTasks := []taskSummaryDTO{}
+	resultCount := 0
+	if queryResults {
+		filters := resultStatusFiltersFor(statusFilter)
+		countArgs := []any{rec.ID.String()}
+		countQuery := `select count(1) from check_results where metrics->>'agent_id'=$1`
+		if len(filters) > 0 {
+			countQuery += fmt.Sprintf(" and lower(status) = any($%d)", len(countArgs)+1)
+			countArgs = append(countArgs, filters)
+		}
+		if err := a.pool.QueryRow(ctx, countQuery, countArgs...).Scan(&resultCount); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			http.Error(w, "db error", http.StatusInternalServerError)
+			return
+		}
+
+		limit := pageSize * page
+		if limit <= 0 {
+			limit = pageSize
+		}
+		args := []any{rec.ID.String()}
+		query := `select cr.id, cr.check_id, cr.kind, cr.status, cr.payload, coalesce(cr.metrics,'{}'::jsonb), cr.created_at,
+                                 c.created_at, c.started_at, c.finished_at
+                            from check_results cr
+                            join checks c on c.id = cr.check_id
+                           where cr.metrics->>'agent_id'=$1`
+		if len(filters) > 0 {
+			query += fmt.Sprintf(" and lower(cr.status) = any($%d)", len(args)+1)
+			args = append(args, filters)
+		}
+		query += fmt.Sprintf(" order by cr.created_at desc limit $%d", len(args)+1)
+		args = append(args, limit)
+
+		rows, err := a.pool.Query(ctx, query, args...)
+		if err != nil {
+			http.Error(w, "db error", http.StatusInternalServerError)
+			return
+		}
+		for rows.Next() {
+			var resID uuid.UUID
+			var kind, status string
+			var payload []byte
+			var metrics []byte
+			var created time.Time
+			var checkCreated time.Time
+			var started, finished sql.NullTime
+			if err := rows.Scan(&resID, new(uuid.UUID), &kind, &status, &payload, &metrics, &created, &checkCreated, &started, &finished); err != nil {
+				rows.Close()
+				http.Error(w, "db error", http.StatusInternalServerError)
+				return
+			}
+			queuedAt := checkCreated
+			if queuedAt.IsZero() {
+				queuedAt = created
+			}
+			mappedStatus := mapResultStatus(status)
+			dto := taskSummaryDTO{
+				ID:         resID.String(),
+				AgentID:    rec.ID.String(),
+				Title:      deriveTaskTitle(kind, payload),
+				Status:     mappedStatus,
+				Progress:   progressForStatus(mappedStatus),
+				QueuedAt:   queuedAt.UTC(),
+				StartedAt:  nullTimePtr(started),
+				FinishedAt: nullTimePtr(finished),
+			}
+			if dto.Status == "failed" {
+				dto.Error = extractErrorMessage(payload, metrics)
+			}
+			resultTasks = append(resultTasks, dto)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			http.Error(w, "db error", http.StatusInternalServerError)
+			return
+		}
+		rows.Close()
+	}
+
+	tasks := append(runningTasks, resultTasks...)
+	sort.Slice(tasks, func(i, j int) bool {
+		if tasks[i].QueuedAt.Equal(tasks[j].QueuedAt) {
+			return tasks[i].ID > tasks[j].ID
+		}
+		return tasks[i].QueuedAt.After(tasks[j].QueuedAt)
+	})
+
+	total := resultCount
+	if includeRunning {
+		total += len(runningTasks)
+	}
+
+	start := (page - 1) * pageSize
+	if start > len(tasks) {
+		start = len(tasks)
+	}
+	end := start + pageSize
+	if end > len(tasks) {
+		end = len(tasks)
+	}
+	items := tasks[start:end]
+	if items == nil {
+		items = []taskSummaryDTO{}
+	}
+
+	resp := pagedTasksResponse{Items: items, Total: total, Page: page, PageSize: pageSize}
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 /*************** Retry loop (lease expiration) ***************/

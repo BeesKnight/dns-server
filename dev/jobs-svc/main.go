@@ -895,12 +895,13 @@ func (a *App) publishUpdate(ctx context.Context, checkID uuid.UUID, typ string, 
 
 /*************** GEO / Map helpers ***************/
 type Geo struct {
-	Lat     float64 `json:"lat"`
-	Lon     float64 `json:"lon"`
-	Country string  `json:"country,omitempty"`
-	City    string  `json:"city,omitempty"`
-	ASN     int     `json:"asn,omitempty"`
-	ASNOrg  string  `json:"asn_org,omitempty"`
+	Lat         float64 `json:"lat"`
+	Lon         float64 `json:"lon"`
+	Country     string  `json:"country,omitempty"`
+	CountryName string  `json:"country_name,omitempty"`
+	City        string  `json:"city,omitempty"`
+	ASN         int     `json:"asn,omitempty"`
+	ASNOrg      string  `json:"asn_org,omitempty"`
 }
 type cityDB interface {
 	City(net.IP) (*geoip2.City, error)
@@ -915,6 +916,27 @@ type asnDB interface {
 type geoIP struct {
 	city cityDB
 	asn  asnDB
+}
+
+func preferredGeoName(names map[string]string) string {
+	if len(names) == 0 {
+		return ""
+	}
+	for _, key := range []string{"ru", "en"} {
+		if value, ok := names[key]; ok {
+			trimmed := strings.TrimSpace(value)
+			if trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	for _, value := range names {
+		trimmed := strings.TrimSpace(value)
+		if trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 func openGeo(cityPath, asnPath string) (*geoIP, error) {
@@ -964,8 +986,14 @@ func (a *App) geoLookup(ipStr string) (*Geo, bool) {
 			if rec.Country.IsoCode != "" {
 				out.Country = rec.Country.IsoCode
 			}
-			if len(rec.City.Names) > 0 {
-				out.City = rec.City.Names["en"]
+			if cname := preferredGeoName(rec.Country.Names); cname != "" {
+				out.CountryName = cname
+				if out.Country == "" {
+					out.Country = cname
+				}
+			}
+			if city := preferredGeoName(rec.City.Names); city != "" {
+				out.City = city
 			}
 		}
 	}

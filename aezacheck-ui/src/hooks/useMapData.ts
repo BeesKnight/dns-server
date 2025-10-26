@@ -97,6 +97,8 @@ const parseGeoPoint = (value: unknown): MapGeo | null => {
     lon,
     city: typeof geo.city === "string" ? geo.city : null,
     country: typeof geo.country === "string" ? geo.country : null,
+    country_name:
+      typeof geo.country_name === "string" ? geo.country_name : null,
     asn:
       geo.asn === null || geo.asn === undefined
         ? null

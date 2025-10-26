@@ -47,6 +47,19 @@ export default function Home() {
       {/* Кнопка справа сверху (стеклянный стиль проекта) */}
       <div className="absolute right-4 top-4 z-50 flex items-center gap-2">
         <Link
+          to="/app/agents"
+          className="inline-flex items-center gap-2 rounded-xl border border-white/10
+                     bg-black/30 hover:bg-white/10 backdrop-blur-md
+                     px-3 py-2 text-sm font-semibold text-slate-200 shadow-lg transition"
+          aria-label="Открыть консоль агентов"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M4 5h16M4 10h16M4 15h10" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+            <circle cx="18" cy="15" r="1.5" stroke="currentColor" strokeWidth="1.6" />
+          </svg>
+          Агенты
+        </Link>
+        <Link
           to="/app/services"
           className="inline-flex items-center gap-2 rounded-xl border border-white/10
                      bg-black/30 hover:bg-white/10 backdrop-blur-md

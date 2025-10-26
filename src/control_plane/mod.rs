@@ -35,7 +35,7 @@ impl fmt::Display for TaskKind {
 }
 
 /// Registration response returned by the control plane.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RegisterResponse {
     pub agent_id: u64,
     pub lease_duration_ms: u64,
@@ -44,7 +44,7 @@ pub struct RegisterResponse {
 }
 
 /// Heartbeat acknowledgement used to refresh the heartbeat deadline.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HeartbeatResponse {
     pub agent_id: u64,
     pub next_deadline_ms: u64,
@@ -117,7 +117,7 @@ pub struct LeaseReport {
 }
 
 /// Representation of a leased task.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Lease {
     pub lease_id: u64,
     pub task_id: u64,
@@ -127,33 +127,33 @@ pub struct Lease {
 }
 
 /// Batched set of leases returned by the control plane when claiming work.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ClaimResponse {
     pub leases: Vec<Lease>,
 }
 
 /// Response payload describing the outcome of a lease extension request.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ExtendOutcome {
     pub lease_id: u64,
     pub new_deadline_ms: u64,
 }
 
 /// Response payload acknowledging lease reports.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ReportResponse {
     pub acknowledged: usize,
 }
 
 /// Request payload for claiming new leases.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ClaimRequest {
     pub agent_id: u64,
     pub capacities: HashMap<TaskKind, usize>,
 }
 
 /// Request payload for extending existing leases.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ExtendRequest {
     pub agent_id: u64,
     pub lease_ids: Vec<u64>,
@@ -161,7 +161,7 @@ pub struct ExtendRequest {
 }
 
 /// Request payload for reporting completed leases back to the control plane.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ReportRequest {
     pub agent_id: u64,
     pub completed: Vec<LeaseReport>,
@@ -169,13 +169,13 @@ pub struct ReportRequest {
 }
 
 /// Heartbeat payload sent to the control plane.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HeartbeatRequest {
     pub agent_id: u64,
 }
 
 /// Request payload used when registering the agent with the control plane.
-#[derive(Debug, Clone, Serialize, PartialEq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct RegisterRequest {
     pub hostname: Option<String>,
 }

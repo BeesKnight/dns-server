@@ -24,6 +24,7 @@ use crate::dispatcher::{DispatchQueues, DispatchedLease, LeaseAssignment};
 use crate::lease_extender::LeaseExtenderClient;
 
 mod ping;
+pub mod storage;
 mod tcp;
 mod trace;
 

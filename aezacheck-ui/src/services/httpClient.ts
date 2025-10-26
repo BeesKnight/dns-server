@@ -79,13 +79,16 @@ async function withErrorHandling<T>(promise: Promise<T>): Promise<T> {
   } catch (error: unknown) {
     if (error instanceof ApiError) throw error;
     if (error instanceof HTTPError) {
+      const httpError = error as HTTPError;
+      const response = httpError.response;
+
       try {
-        const data = await error.response.clone().json();
-        const message = typeof data?.message === "string" ? data.message : error.message;
-        throw new ApiError(message, { status: error.response.status, details: data });
+        const data = await response.clone().json();
+        const message = typeof data?.message === "string" ? data.message : httpError.message;
+        throw new ApiError(message, { status: response.status, details: data });
       } catch {
-        const text = await error.response.clone().text().catch(() => "");
-        throw new ApiError(text || error.message, { status: error.response.status });
+        const text = await response.clone().text().catch(() => "");
+        throw new ApiError(text || httpError.message, { status: response.status });
       }
     }
     if (error instanceof Error) {

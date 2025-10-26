@@ -13,6 +13,7 @@ RUN apt-get update \
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY src ./src
 COPY tests ./tests
+COPY infra/migrations ./infra/migrations
 
 RUN cargo build --release --bin dns_agent
 

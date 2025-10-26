@@ -45,6 +45,25 @@ export type ServiceReviewCreateResult = {
   averageRating: number;
 };
 
+export type CheckResult = {
+  id: string;
+  kind: string;
+  status: string;
+  payload: unknown;
+  metrics?: unknown;
+  createdAt: string;
+};
+
+export type CheckResults = {
+  checkId: string;
+  status: string;
+  createdAt?: string;
+  startedAt?: string;
+  finishedAt?: string;
+  dnsServer?: string | null;
+  results: CheckResult[];
+};
+
 /* ================= Helpers ================= */
 
 type RawServiceSummary = {
@@ -74,6 +93,25 @@ type RawServiceReviewCreate = {
   review: RawServiceReview;
   review_count: number;
   average_rating: number;
+};
+
+type RawCheckResult = {
+  id: string;
+  kind: string;
+  status: string;
+  payload: unknown;
+  metrics?: unknown;
+  created_at: string;
+};
+
+type RawCheckResults = {
+  check_id: string;
+  status: string;
+  created_at?: string;
+  started_at?: string;
+  finished_at?: string;
+  dns_server?: string;
+  results: RawCheckResult[];
 };
 
 const API_BASE = import.meta.env.VITE_API_BASE?.replace(/\/?$/, "") ?? (import.meta.env.DEV ? "/api" : "/v1");
@@ -117,6 +155,25 @@ const mapServiceReview = (item: RawServiceReview): ServiceReview => ({
   rating: item.rating,
   text: item.text,
   createdAt: item.created_at,
+});
+
+const mapCheckResult = (item: RawCheckResult): CheckResult => ({
+  id: item.id,
+  kind: item.kind,
+  status: item.status,
+  payload: item.payload ?? null,
+  metrics: item.metrics ?? undefined,
+  createdAt: item.created_at,
+});
+
+const mapCheckResults = (raw: RawCheckResults): CheckResults => ({
+  checkId: raw.check_id,
+  status: raw.status,
+  createdAt: raw.created_at,
+  startedAt: raw.started_at,
+  finishedAt: raw.finished_at,
+  dnsServer: raw.dns_server ?? null,
+  results: Array.isArray(raw.results) ? raw.results.map(mapCheckResult) : [],
 });
 
 /**
@@ -201,4 +258,11 @@ export const api = {
       method: "POST",
       body: { url, kinds, ...opts },
     }),
+
+  getCheckResults: async (checkId: string) => {
+    const data = await call<RawCheckResults>(
+      `v1/jobs/checks/${encodeURIComponent(checkId)}`
+    );
+    return mapCheckResults(data);
+  },
 };

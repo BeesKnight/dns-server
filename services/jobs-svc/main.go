@@ -200,6 +200,7 @@ func main() {
 		rt.Get("/map/stream", app.handleMapStream)     // SSE
 		rt.Get("/map/snapshot", app.handleMapSnapshot) // история из Stream
 		rt.Get("/checks/{id}/geo", app.handleCheckGeo)
+		rt.Get("/jobs/checks/{id}", app.handleCheckResults)
 		rt.Get("/geo/lookup", app.handleGeoLookup)
 		rt.Post("/jobs/checks", app.handleQuickCheckCreate)
 	})
@@ -1719,6 +1720,109 @@ func (a *App) handleMapSnapshot(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{"items": items, "next_cursor": nextCursor})
+}
+
+type checkResultDTO struct {
+	ID        uuid.UUID       `json:"id"`
+	Kind      string          `json:"kind"`
+	Status    string          `json:"status"`
+	Payload   json.RawMessage `json:"payload"`
+	Metrics   json.RawMessage `json:"metrics,omitempty"`
+	CreatedAt time.Time       `json:"created_at"`
+}
+
+type checkResultsResponse struct {
+	CheckID    uuid.UUID        `json:"check_id"`
+	Status     string           `json:"status"`
+	CreatedAt  *time.Time       `json:"created_at,omitempty"`
+	StartedAt  *time.Time       `json:"started_at,omitempty"`
+	FinishedAt *time.Time       `json:"finished_at,omitempty"`
+	DNSServer  string           `json:"dns_server,omitempty"`
+	Results    []checkResultDTO `json:"results"`
+}
+
+func nullTimePtr(nt sql.NullTime) *time.Time {
+	if !nt.Valid {
+		return nil
+	}
+	t := nt.Time
+	return &t
+}
+
+func (a *App) handleCheckResults(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	idStr := chi.URLParam(r, "id")
+	cid, err := uuid.Parse(idStr)
+	if err != nil {
+		http.Error(w, "bad id", http.StatusBadRequest)
+		return
+	}
+	var status sql.NullString
+	var createdAt sql.NullTime
+	var startedAt sql.NullTime
+	var finishedAt sql.NullTime
+	err = a.pool.QueryRow(r.Context(),
+		`select status, created_at, started_at, finished_at from checks where id=$1`, cid).
+		Scan(&status, &createdAt, &startedAt, &finishedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+
+	var dnsServer sql.NullString
+	_ = a.pool.QueryRow(r.Context(),
+		`select dns_server::text from quick_checks where check_id=$1`, cid).Scan(&dnsServer)
+
+	rows, err := a.pool.Query(r.Context(),
+		`select id, kind, status, payload, metrics, created_at from check_results where check_id=$1 order by created_at asc`, cid)
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	results := make([]checkResultDTO, 0)
+	for rows.Next() {
+		var rid uuid.UUID
+		var kind string
+		var resStatus string
+		var payload []byte
+		var metrics []byte
+		var created time.Time
+		if err := rows.Scan(&rid, &kind, &resStatus, &payload, &metrics, &created); err != nil {
+			http.Error(w, "db error", http.StatusInternalServerError)
+			return
+		}
+		entry := checkResultDTO{ID: rid, Kind: kind, Status: resStatus, Payload: json.RawMessage(payload), CreatedAt: created}
+		if len(metrics) > 0 {
+			entry.Metrics = json.RawMessage(metrics)
+		}
+		results = append(results, entry)
+	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+
+	resp := checkResultsResponse{
+		CheckID:    cid,
+		Status:     strings.TrimSpace(status.String),
+		CreatedAt:  nullTimePtr(createdAt),
+		StartedAt:  nullTimePtr(startedAt),
+		FinishedAt: nullTimePtr(finishedAt),
+		Results:    results,
+	}
+	if dnsServer.Valid {
+		resp.DNSServer = dnsServer.String
+	}
+	if resp.Status == "" {
+		resp.Status = "unknown"
+	}
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func (a *App) handleCheckGeo(w http.ResponseWriter, r *http.Request) {

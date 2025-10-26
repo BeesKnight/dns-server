@@ -50,8 +50,10 @@ export default function Services() {
         if (!cancelled) {
           setList(items);
           setModal((prev) => {
-            if (!prev.open || !prev.service) return prev;
-            const updated = items.find((it) => it.id === prev.service.id);
+            if (!prev.open) return prev;
+            const prevService = prev.service;
+            if (!prevService) return prev;
+            const updated = items.find((it) => it.id === prevService.id);
             return updated ? { open: true, service: updated } : prev;
           });
         }

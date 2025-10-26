@@ -433,7 +433,7 @@ func (a *App) handleProfile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := a.pool.Query(ctx, `
-select id, service_id, rating, created_at
+select id, service_id, rating, review, created_at
 from service_reviews
 where user_id=$1
 order by created_at desc
@@ -450,6 +450,7 @@ limit 50
 		ServiceID   string    `json:"serviceId"`
 		ServiceName string    `json:"serviceName"`
 		Rating      int       `json:"rating"`
+		Text        string    `json:"text"`
 		CreatedAt   time.Time `json:"createdAt"`
 	}
 
@@ -459,9 +460,10 @@ limit 50
 			id        uuid.UUID
 			serviceID string
 			rating    int
+			text      string
 			createdAt time.Time
 		)
-		if err := rows.Scan(&id, &serviceID, &rating, &createdAt); err != nil {
+		if err := rows.Scan(&id, &serviceID, &rating, &text, &createdAt); err != nil {
 			http.Error(w, "db error", http.StatusInternalServerError)
 			return
 		}
@@ -477,6 +479,7 @@ limit 50
 			ServiceID:   serviceID,
 			ServiceName: serviceName,
 			Rating:      rating,
+			Text:        text,
 			CreatedAt:   createdAt,
 		})
 	}

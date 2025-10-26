@@ -831,7 +831,7 @@ func TestGeoLookupResponseContainsGeoFields(t *testing.T) {
 				AccuracyRadius uint16  `maxminddb:"accuracy_radius"`
 			}{Latitude: 40.7128, Longitude: -74.0060},
 		}},
-		asn: &fakeASNDB{record: &geoip2.ASN{AutonomousSystemNumber: 64500}},
+		asn: &fakeASNDB{record: &geoip2.ASN{AutonomousSystemNumber: 64500, AutonomousSystemOrganization: "Example ISP"}},
 	}}
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/geo/lookup?ip=203.0.113.5", nil)
@@ -856,6 +856,9 @@ func TestGeoLookupResponseContainsGeoFields(t *testing.T) {
 	}
 	if geo["asn"].(float64) != 64500 {
 		t.Fatalf("expected ASN 64500, got %#v", geo["asn"])
+	}
+	if org, ok := geo["asn_org"].(string); !ok || org != "Example ISP" {
+		t.Fatalf("expected ASN org Example ISP, got %#v", geo["asn_org"])
 	}
 	if geo["country"].(string) != "US" {
 		t.Fatalf("expected country US, got %#v", geo["country"])
@@ -910,7 +913,7 @@ func TestHandleCheckGeoIncludesGeoInformation(t *testing.T) {
 				AccuracyRadius uint16  `maxminddb:"accuracy_radius"`
 			}{Latitude: 10.0, Longitude: 20.0},
 		}},
-		asn: &fakeASNDB{record: &geoip2.ASN{AutonomousSystemNumber: 64500}},
+		asn: &fakeASNDB{record: &geoip2.ASN{AutonomousSystemNumber: 64500, AutonomousSystemOrganization: "Example ISP"}},
 	}}
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/checks/"+checkID.String()+"/geo", nil)
@@ -935,6 +938,9 @@ func TestHandleCheckGeoIncludesGeoInformation(t *testing.T) {
 	if sourceGeo["lat"].(float64) == 0 || sourceGeo["asn"].(float64) != 64500 {
 		t.Fatalf("unexpected source geo %#v", sourceGeo)
 	}
+	if org, ok := sourceGeo["asn_org"].(string); !ok || org != "Example ISP" {
+		t.Fatalf("unexpected source geo asn_org %#v", sourceGeo["asn_org"])
+	}
 
 	targets := payload["targets"].([]any)
 	if len(targets) == 0 {
@@ -953,6 +959,9 @@ func TestHandleCheckGeoIncludesGeoInformation(t *testing.T) {
 	hopGeo := hops[0].(map[string]any)["geo"].(map[string]any)
 	if hopGeo["asn"].(float64) != 64500 {
 		t.Fatalf("expected hop geo ASN, got %#v", hopGeo)
+	}
+	if org, ok := hopGeo["asn_org"].(string); !ok || org != "Example ISP" {
+		t.Fatalf("expected hop geo ASN org, got %#v", hopGeo["asn_org"])
 	}
 }
 

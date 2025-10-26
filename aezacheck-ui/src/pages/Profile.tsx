@@ -27,6 +27,7 @@ export default function Profile() {
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [activeReview, setActiveReview] = useState<UserProfile["reviews"][number] | null>(null);
 
   const dateTimeFormatter = useMemo(
     () =>
@@ -148,7 +149,17 @@ export default function Profile() {
                   {profile.reviews.map((review) => (
                     <li
                       key={review.id}
-                      className="rounded-2xl border border-white/10 bg-white/5 px-4 py-4 backdrop-blur-sm transition hover:border-white/20 hover:bg-white/10"
+                      className="cursor-pointer rounded-2xl border border-white/10 bg-white/5 px-4 py-4 backdrop-blur-sm transition hover:border-white/20 hover:bg-white/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/70"
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => setActiveReview(review)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          setActiveReview(review);
+                        }
+                      }}
+                      aria-label={`Открыть отзыв по сервису ${review.serviceName}`}
                     >
                       <div className="flex flex-wrap items-center justify-between gap-3">
                         <div className="min-w-0">
@@ -166,6 +177,11 @@ export default function Profile() {
                           {dateTimeFormatter.format(new Date(review.createdAt))}
                         </div>
                       </div>
+                      {review.text.trim() && (
+                        <p className="mt-2 overflow-hidden text-ellipsis whitespace-nowrap text-sm text-slate-300">
+                          {review.text.trim()}
+                        </p>
+                      )}
                     </li>
                   ))}
                 </ul>
@@ -186,6 +202,87 @@ export default function Profile() {
               Здесь будут появляться накопленные бейджи и достижения. Следите за обновлениями!
             </div>
           </aside>
+        </div>
+      </div>
+
+      {activeReview && (
+        <ReviewDetailsModal
+          review={activeReview}
+          onClose={() => setActiveReview(null)}
+          formatDate={(iso) => dateTimeFormatter.format(new Date(iso))}
+        />
+      )}
+    </div>
+  );
+}
+
+type ReviewDetailsModalProps = {
+  review: UserProfile["reviews"][number];
+  onClose: () => void;
+  formatDate: (iso: string) => string;
+};
+
+function ReviewDetailsModal({ review, onClose, formatDate }: ReviewDetailsModalProps) {
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.body.style.overflow = prev;
+    };
+  }, [onClose]);
+
+  const displayText = review.text.trim();
+
+  return (
+    <div
+      className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4"
+      role="dialog"
+      aria-modal="true"
+      onClick={onClose}
+    >
+      <div
+        className="w-[min(640px,100%)] rounded-2xl border border-white/10 bg-slate-900/70 p-5 text-slate-200 shadow-2xl backdrop-blur-xl"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <div>
+            <div className="text-xs uppercase tracking-wide text-slate-400">Отзыв по сервису</div>
+            <div className="text-xl font-semibold text-white">{review.serviceName}</div>
+          </div>
+          <button
+            onClick={onClose}
+            className="rounded-xl border border-white/10 bg-slate-900/55 px-3 py-1.5 text-sm text-slate-200 transition hover:bg-slate-900/70"
+            type="button"
+          >
+            Закрыть
+          </button>
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2 text-lg font-semibold text-white">
+            {stars(review.rating).map((symbol, index) => (
+              <span key={index} className={symbol === "☆" ? "opacity-30" : ""}>
+                {symbol}
+              </span>
+            ))}
+            <span className="text-sm text-slate-300">{review.rating.toFixed(1)}</span>
+          </div>
+          <div className="text-xs text-slate-400">{formatDate(review.createdAt)}</div>
+        </div>
+
+        <div className="mt-4 rounded-2xl border border-white/10 bg-white/5 p-4 text-sm text-slate-200">
+          {displayText ? (
+            <p className="whitespace-pre-wrap leading-relaxed">{displayText}</p>
+          ) : (
+            <p className="text-slate-400">Комментарий отсутствует.</p>
+          )}
         </div>
       </div>
     </div>
